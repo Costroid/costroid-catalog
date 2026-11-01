@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Costroid/costroid-catalog/schema/v0.1/catalog.schema.json",
+  "title": "Costroid price catalog sheet, schema 0.1",
+  "description": "One provider's published prices on one date. Column names follow FOCUS where FOCUS has the column: SkuPriceId, ListUnitPrice, PricingUnit, PricingCurrency, RegionId, ServiceProviderName. Every amount is a decimal string in PricingCurrency, never a JSON number. A row states what the source page states. Nothing is derived except a fallback row, which names its rule.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["SchemaVersion", "CatalogVersion", "Provider", "ServiceProviderName", "SheetDate", "rows"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "SchemaVersion": { "const": "0.1" },
+    "CatalogVersion": {
+      "description": "Semantic version of the catalog release.",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "Provider": { "$ref": "#/$defs/provider" },
+    "ServiceProviderName": { "type": "string", "minLength": 1 },
+    "SheetDate": { "$ref": "#/$defs/date" },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/unitPrice" },
+          { "$ref": "#/$defs/multiplier" },
+          { "$ref": "#/$defs/additiveRate" },
+          { "$ref": "#/$defs/fee" },
+          { "$ref": "#/$defs/creditRate" },
+          { "$ref": "#/$defs/requestMultiplier" },
+          { "$ref": "#/$defs/toolOverhead" },
+          { "$ref": "#/$defs/reasoning" },
+          { "$ref": "#/$defs/fallback" }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "A sheet with no fallback row would price an unknown model at nothing.",
+      "properties": {
+        "rows": { "contains": { "type": "object", "required": ["RowType"], "properties": { "RowType": { "const": "fallback" } } } }
+      }
+    }
+  ],
+  "$defs": {
+    "provider": { "enum": ["anthropic", "openai", "google", "github-copilot", "cursor"] },
+    "date": { "type": "string", "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$" },
+    "decimal": {
+      "description": "A non-negative decimal string, digits as the provider published them.",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)(\\.\\d+)?$"
+    },
+    "positiveDecimal": {
+      "description": "A decimal string above zero.",
+      "type": "string",
+      "pattern": "^(?!0+(\\.0+)?$)(0|[1-9]\\d*)(\\.\\d+)?$"
+    },
+    "tokenClass": {
+      "description": "input_uncached, cache_read, cache_write_5m, cache_write_1h and output are the ledger's billed classes. cache_write_30m, cache_write_12h and cache_write_unspecified carry what a provider publishes that those five do not name. cache_storage is an hourly storage price.",
+      "enum": [
+        "input_uncached",
+        "cache_read",
+        "cache_write_5m",
+        "cache_write_1h",
+        "cache_write_30m",
+        "cache_write_12h",
+        "cache_write_unspecified",
+        "cache_storage",
+        "output"
+      ]
+    },
+    "serviceTier": { "enum": ["standard", "batch", "flex", "fast", "ultrafast", "priority", "contributor"] },
+    "modelStatus": {
+      "description": "What the provider's own pages say about the model. unstated means they say nothing.",
+      "enum": ["active", "deprecated", "retired", "limited", "preview", "unstated"]
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["SourceUrl", "RetrievalDate", "SourceSha256"],
+      "properties": {
+        "SourceUrl": { "type": "string", "pattern": "^https://" },
+        "RetrievalDate": { "$ref": "#/$defs/date" },
+        "SourceSha256": {
+          "description": "SHA-256 of the page bytes as retrieved.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "effective": {
+      "type": "object",
+      "required": ["EffectiveStart", "EffectiveEnd"],
+      "properties": {
+        "EffectiveStart": {
+          "description": "First day the row holds. For a price with no published start, the retrieval date: the day it was seen in force.",
+          "$ref": "#/$defs/date"
+        },
+        "EffectiveEnd": {
+          "description": "First day the row no longer holds, exclusive. Null when the provider states no end.",
+          "oneOf": [{ "$ref": "#/$defs/date" }, { "type": "null" }]
+        }
+      }
+    },
+    "common": {
+      "type": "object",
+      "required": ["SkuPriceId", "ServiceProviderName"],
+      "properties": {
+        "SkuPriceId": { "type": "string", "minLength": 1 },
+        "ServiceProviderName": { "type": "string", "minLength": 1 }
+      }
+    },
+    "unitPrice": {
+      "description": "A price the provider published for one token class.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "ModelId", "ModelName", "ModelIdBasis", "ModelStatus", "RegionId", "ServiceTier", "ContextTierMinInputTokens", "ContextTierMaxInputTokens", "PricingUnit", "PricingCurrency", "TokenClass", "ListUnitPrice"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "unit_price" },
+        "ModelId": { "type": "string", "minLength": 1 },
+        "ModelName": { "type": "string", "minLength": 1 },
+        "ModelIdBasis": {
+          "description": "provider_id: the id the provider's API accepts. display_name_slug: the page names the model only in words, so the id is that name lower-cased with dashes.",
+          "enum": ["provider_id", "display_name_slug"]
+        },
+        "ModelPublisher": { "description": "Who built the model, on a sheet of a reseller.", "type": "string" },
+        "ModelStatus": { "$ref": "#/$defs/modelStatus" },
+        "RegionId": { "description": "global is the provider's default routing, with no residency commitment.", "type": "string" },
+        "ServiceTier": { "$ref": "#/$defs/serviceTier" },
+        "ContextTierMinInputTokens": {
+          "description": "The tier applies above this many input tokens, exclusive. Null when it has no lower bound.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "ContextTierMaxInputTokens": {
+          "description": "The tier applies up to this many input tokens, inclusive. Null when it has no upper bound.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "PricingUnit": { "enum": ["1000000 Tokens", "1000000 Token-Hours"] },
+        "PricingCurrency": { "const": "USD" },
+        "TokenClass": { "$ref": "#/$defs/tokenClass" },
+        "ListUnitPrice": { "$ref": "#/$defs/positiveDecimal" },
+        "Note": { "type": "string" }
+      }
+    },
+    "multiplier": {
+      "description": "A factor the provider published in place of prices. An empty AppliesToModels means every model on the sheet, unless a narrower row names it.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "ModifierKind", "Multiplier", "AppliesToModels", "AppliesToTokenClasses", "Condition"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "multiplier" },
+        "ModifierKind": { "enum": ["prompt_cache", "batch", "data_residency", "max_mode"] },
+        "RegionId": { "type": "string" },
+        "Multiplier": { "$ref": "#/$defs/positiveDecimal" },
+        "AppliesToModels": { "type": "array", "items": { "type": "string" } },
+        "AppliesToTokenClasses": {
+          "description": "Empty means every token class.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/tokenClass" }
+        },
+        "Condition": { "type": ["string", "null"] }
+      }
+    },
+    "additiveRate": {
+      "description": "An amount a reseller adds to each token on top of the model's price.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "RateName", "ListUnitPrice", "PricingUnit", "PricingCurrency", "ExcludedModels", "Condition"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "additive_rate" },
+        "RateName": { "type": "string" },
+        "ListUnitPrice": { "$ref": "#/$defs/positiveDecimal" },
+        "PricingUnit": { "const": "1000000 Tokens" },
+        "PricingCurrency": { "const": "USD" },
+        "ExcludedModels": { "type": "array", "items": { "type": "string" } },
+        "Condition": { "type": "string" }
+      }
+    },
+    "fee": {
+      "description": "A price per use that is not a token price.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "FeeName", "ListUnitPrice", "PricingUnit", "PricingCurrency", "Condition"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "fee" },
+        "FeeName": { "type": "string" },
+        "ListUnitPrice": { "$ref": "#/$defs/positiveDecimal" },
+        "PricingUnit": { "enum": ["Requests", "1000 Requests", "Container-Hours", "Session-Hours"] },
+        "PricingCurrency": { "const": "USD" },
+        "Condition": { "type": "string" }
+      }
+    },
+    "creditRate": {
+      "description": "What one unit of a vendor's credit is worth.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "CreditName", "ListUnitPrice", "PricingUnit", "PricingCurrency", "Condition"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "credit_rate" },
+        "CreditName": { "type": "string" },
+        "ListUnitPrice": { "$ref": "#/$defs/positiveDecimal" },
+        "PricingUnit": { "const": "Credits" },
+        "PricingCurrency": { "const": "USD" },
+        "Condition": { "type": "string" }
+      }
+    },
+    "requestMultiplier": {
+      "description": "How many billed requests one request to this model counts as.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "ModelId", "ModelName", "Multiplier", "Condition"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "request_multiplier" },
+        "ModelId": { "type": "string" },
+        "ModelName": { "type": "string" },
+        "Multiplier": { "$ref": "#/$defs/positiveDecimal" },
+        "Condition": { "type": "string" }
+      }
+    },
+    "toolOverhead": {
+      "description": "Fixed input tokens the provider adds to a request that declares tools.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "ModelId", "ToolChoice", "OverheadTokens"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "tool_overhead" },
+        "ModelId": { "type": "string" },
+        "ToolChoice": { "enum": ["auto_none", "any_tool"] },
+        "OverheadTokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "reasoning": {
+      "description": "How the provider bills reasoning tokens. An empty AppliesToModels means every model on the sheet.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "AppliesToModels", "ReasoningBilledAs"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "reasoning" },
+        "AppliesToModels": { "type": "array", "items": { "type": "string" } },
+        "ReasoningBilledAs": { "const": "output" }
+      }
+    },
+    "fallback": {
+      "description": "The rate for a model the sheet does not name. Costroid's rule, not a provider's price: FallbackBasis states it, and the source is the page the rule read. Never zero.",
+      "allOf": [{ "$ref": "#/$defs/common" }, { "$ref": "#/$defs/provenance" }, { "$ref": "#/$defs/effective" }],
+      "required": ["RowType", "ModelId", "TokenClass", "ListUnitPrice", "PricingUnit", "PricingCurrency", "FallbackBasis"],
+      "unevaluatedProperties": false,
+      "properties": {
+        "RowType": { "const": "fallback" },
+        "ModelId": { "const": "*" },
+        "TokenClass": { "$ref": "#/$defs/tokenClass" },
+        "ListUnitPrice": { "$ref": "#/$defs/positiveDecimal" },
+        "PricingUnit": { "const": "1000000 Tokens" },
+        "PricingCurrency": { "const": "USD" },
+        "FallbackBasis": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
