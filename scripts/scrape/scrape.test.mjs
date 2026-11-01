@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -21,8 +21,12 @@ import {
 import { readPriceCell } from './parsers/google.mjs';
 import { PAGES } from './sources.mjs';
 
-const pages = loadPages();
-const { sheets } = buildSheets(pages);
+// Provider pages are third-party text, so they are not published. A checkout
+// without them runs what needs no page and skips the rest by name.
+const pagesSaved = loadSources().every((source) => existsSync(join(TESTDATA, source.file)));
+const needsPages = { skip: pagesSaved ? false : 'the saved provider pages are not published: run npm run fetch' };
+const pages = pagesSaved ? loadPages() : new Map();
+const { sheets } = pagesSaved ? buildSheets(pages) : { sheets: [] };
 const sheet = (provider) => sheets.find(({ Provider }) => Provider === provider);
 
 function priceOf(provider, modelId, tokenClass, scope = {}) {
@@ -79,7 +83,7 @@ describe('markdown and decimals', () => {
   });
 });
 
-describe('Anthropic sheet, read against the page by hand', () => {
+describe('Anthropic sheet, read against the page by hand', needsPages, () => {
   test('carries the four current models at every published class', () => {
     assert.deepEqual(
       ['input_uncached', 'cache_write_5m', 'cache_write_1h', 'cache_read', 'output'].map((tokenClass) =>
@@ -157,7 +161,7 @@ describe('Anthropic sheet, read against the page by hand', () => {
   });
 });
 
-describe('OpenAI sheet, read against the page by hand', () => {
+describe('OpenAI sheet, read against the page by hand', needsPages, () => {
   const short = { ContextTierMaxInputTokens: 272000 };
   const long = { ContextTierMinInputTokens: 272000 };
 
@@ -201,7 +205,7 @@ describe('OpenAI sheet, read against the page by hand', () => {
   });
 });
 
-describe('Google sheet, read against the page by hand', () => {
+describe('Google sheet, read against the page by hand', needsPages, () => {
   test('a cell with two dated steps gives two ranges', () => {
     assert.deepEqual(readPriceCell('$2.00 through November 30, 2026. $4.00 starting December 1, 2026.'), [
       { amount: '2.00', storage: false, EffectiveEnd: '2026-12-01' },
@@ -266,7 +270,7 @@ describe('Google sheet, read against the page by hand', () => {
   });
 });
 
-describe('Copilot sheet, read against the page by hand', () => {
+describe('Copilot sheet, read against the page by hand', needsPages, () => {
   test('states the AI credit rate', () => {
     assert.equal(rowById('github-copilot:credit:ai-credit').ListUnitPrice, '0.01');
   });
@@ -295,7 +299,7 @@ describe('Copilot sheet, read against the page by hand', () => {
   });
 });
 
-describe('Cursor sheet, read against the page by hand', () => {
+describe('Cursor sheet, read against the page by hand', needsPages, () => {
   test('reads a windowed model as a context tier', () => {
     assert.equal(price('cursor', 'grok-4.7', 'input_uncached', { ContextTierMinInputTokens: null }), '2');
     const windowed = priceOf('cursor', 'grok-4.7', 'input_uncached', { ContextTierMinInputTokens: 256000 });
@@ -323,7 +327,7 @@ describe('Cursor sheet, read against the page by hand', () => {
   });
 });
 
-describe('every sheet', () => {
+describe('every sheet', needsPages, () => {
   test('the committed sheets are what the saved pages build to', () => {
     for (const built of sheets) {
       const committed = readFileSync(join(ROOT, 'sheets', CATALOG_VERSION, sheetFileName(built)), 'utf8');
@@ -364,7 +368,7 @@ describe('every sheet', () => {
   });
 });
 
-describe('the scrape job', () => {
+describe('the scrape job', needsPages, () => {
   const changed = (id, from, to) => ({ ...pages, [id]: { ...pages[id], text: pages[id].text.replace(from, to) } });
 
   test('a changed page shows in the diff with both figures', () => {
@@ -397,7 +401,7 @@ describe('the scrape job', () => {
   });
 });
 
-describe('the cross-check', () => {
+describe('the cross-check', needsPages, () => {
   const sources = loadSources();
   const snapshot = (id) =>
     JSON.parse(readFileSync(join(TESTDATA, sources.find((source) => source.id === id).file), 'utf8'));
@@ -443,15 +447,18 @@ describe('the cross-check', () => {
 describe('the schema and validator', () => {
   const schema = JSON.parse(readFileSync(join(ROOT, 'schema', 'v0.1', 'catalog.schema.json'), 'utf8'));
   const validate = new Ajv2020({ strict: false }).compile(schema);
+  const published = JSON.parse(
+    readFileSync(join(ROOT, 'sheets', CATALOG_VERSION, 'anthropic-2026-11-01.json'), 'utf8'),
+  );
   const mutate = (change) => {
-    const copy = structuredClone(sheet('anthropic'));
+    const copy = structuredClone(published);
     change(copy);
     return validate(copy);
   };
   const first = (rows, type) => rows.find(({ RowType }) => RowType === type);
 
-  test('accepts a built sheet', () => {
-    assert.equal(validate(sheet('anthropic')), true);
+  test('accepts a published sheet', () => {
+    assert.equal(validate(published), true);
   });
 
   test('refuses a price written as a number', () => {
@@ -512,7 +519,7 @@ describe('the schema and validator', () => {
     execFileSync(process.execPath, [join(ROOT, 'scripts', 'validate.mjs')], { stdio: 'pipe' });
   });
 
-  test('scripts/validate.mjs exits 1 when a saved page changes under a row', () => {
+  test('scripts/validate.mjs exits 1 when a saved page changes under a row', needsPages, () => {
     const script = `
       import { cpSync, mkdtempSync, writeFileSync, appendFileSync } from 'node:fs';
       import { tmpdir } from 'node:os';
