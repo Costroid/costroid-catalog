@@ -4,6 +4,8 @@
 
 Report through GitHub private vulnerability reporting: open the Security tab of this repository and choose "Report a vulnerability". Do not open a public issue.
 
+If you cannot use GitHub, write to security@costroid.com.
+
 Include the affected file or version, the impact and the steps to reproduce.
 
 ## Response targets
