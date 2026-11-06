@@ -1,3 +1,6 @@
 node_modules/
 scripts/scrape/testdata/pages/
 scripts/scrape/testdata/crosscheck/
+.claude/
+CLAUDE.md
+CLAUDE.local.md

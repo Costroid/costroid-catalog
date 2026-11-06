@@ -21,3 +21,12 @@ CI rejects a pull request with an unsigned commit. Contributions are licensed un
 5. Open a pull request with three sections: changed, deliberately unchanged, verified.
 
 Commit messages use the imperative mood and say what changed and why.
+
+## Rules
+
+- A published release directory is never edited. A change is a new release.
+- Prices are decimal strings, never JSON numbers.
+- Every price row carries its source URL, retrieval date and page hash.
+- A price not on the provider's page is omitted and named in the report. Never fill from memory.
+- A disagreement with a cross-check is a finding, never the source of a price.
+- No platform code enters this repository.

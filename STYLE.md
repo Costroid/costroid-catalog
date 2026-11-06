@@ -1,11 +1,29 @@
-# Public quality bar
+# Style
 
-Every public line is judged by this bar. It applies to both products.
+Every public line in this repository, code or prose, meets this bar.
 
-Every public line, code or prose, in either product, is judged as if a senior engineer at a company people admire wrote it by hand. The bar for the repositories, the documentation site, the READMEs, the PR comment the product posts, the platform's pages and emails, the CLI help text and the release notes:
+## Prose
 
-- Prose: short declarative sentences; one idea per paragraph; no filler, hype, emoji, exclamation marks or marketing adjectives; no "in this document we will", no "seamlessly", "robust", "powerful", "comprehensive", "leverage", "delve", "streamline" or "unlock"; no bullet lists of three adjectives; no closing summaries that repeat the section; no apology or hedging; numbers carry units and dates; every claim about accuracy or performance links to the measurement.
-- Documentation: a README answers what it is, why it exists, how to install and what the first command shows, in under a minute of reading; every example runs in CI as a test so it can never go stale; one page per task, not per feature; the comparison page states facts with dates and links, never adjectives about competitors.
-- Code: no generated boilerplate comments, no comments that restate the code, no TODO or FIXME on the main branch, no dead code, no commented-out code, no placeholder names, no copy-pasted blocks; idiomatic Go passing `gofmt`, `go vet` and `staticcheck` with zero findings in Costroid, idiomatic Rust passing `rustfmt` and `clippy` with zero warnings in the platform (path-scoped rules in `.claude/rules/`); functions small enough to read whole; errors wrapped with context and never swallowed; tests that state what they prove in their name.
-- History: commit messages that say what changed and why in the imperative mood; release notes written for a user, grouped by what they can now do, with breaking changes first.
-- Enforcement: `STYLE.md` in every repository; a review agent whose only job is this bar, run on every pull request and every docs change, that rejects the telltale patterns above by name; nothing public merges without it (community pull requests after `safe-to-review`). Reference quality: the documentation of Stripe, Tailscale and kubectl, the READMEs of Sigstore and OpenTofu.
+- Write short declarative sentences, one idea per paragraph.
+- Leave out filler, hype, emoji, exclamation marks and marketing adjectives. Words such as "seamlessly", "robust", "powerful", "comprehensive", "leverage", "delve", "streamline" and "unlock" are rejected.
+- Do not end a section with a summary of it. Do not apologise or hedge.
+- Give every number its unit and, where it can change, its date. Link every claim about accuracy or performance to its measurement.
+
+## Documentation
+
+- A README says what the project is, why it exists, how to install it and what the first command shows.
+- Every example runs in CI as a test.
+- Write one page per task, not one per feature.
+- A comparison with another project states facts with dates and links, never adjectives.
+
+## Code
+
+- No generated boilerplate comments, no comments that restate the code, no TODO or FIXME on the main branch, no dead or commented-out code, no placeholder names and no copied blocks.
+- Functions are small enough to read whole.
+- Errors carry context and are never swallowed.
+- A test name states what the test proves.
+
+## History
+
+- Commit messages use the imperative mood and say what changed and why.
+- Release notes are written for users, grouped by what they can now do, with breaking changes first.
