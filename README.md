@@ -15,7 +15,7 @@ A cost figure is only as good as its price. Each price here names the page it ca
 
 ## Sources
 
-Provider pages and third-party price lists are not published here, because their text belongs to their owners. `scripts/scrape/testdata/SOURCES.json` records each one's URL, retrieval date and SHA-256, and every price row carries the same three. A page read later may differ, because providers change them. `npm run fetch` saves the current pages, and `npm test` then runs the sheet tests. Without saved pages, those tests skip by name and the validator checks rows against `SOURCES.json` alone.
+Provider pages and third-party price lists are not published here, because their text belongs to their owners. `scripts/scrape/testdata/SOURCES.json` records each one's URL, retrieval date and SHA-256, and every price row carries the same three. A page read later may differ, because providers change them. `npm run fetch` saves the current pages, and `npm test` then runs the sheet tests. Without saved pages, those tests skip by name and the validator checks rows against `SOURCES.json` and each release's `reports/<version>-sources.json` alone.
 
 ## Install
 

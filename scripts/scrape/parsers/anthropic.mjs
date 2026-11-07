@@ -1,4 +1,3 @@
-import { fallbackRows } from '../lib/rows.mjs';
 import { moneyOf, parseTables, requireMatch, sections, stripMarkup } from '../lib/markdown.mjs';
 
 export const META = { sheet: 'anthropic', serviceProviderName: 'Anthropic' };
@@ -232,13 +231,6 @@ export function parse(pages, factory) {
   const thinking = pages['anthropic-thinking'];
   requireMatch(thinking.text, /the tokens Claude spends reasoning are billed as output tokens/, 'thinking billing');
   rows.push(factory.reasoning(thinking, { key: 'thinking' }));
-
-  rows.push(
-    ...fallbackRows(factory, pricing, rows, {
-      inScope: () => true,
-      basis: 'Highest standard-tier list price per token class across models the status page does not mark retired.',
-    }),
-  );
 
   const statusOnly = index.filter(({ id, status }) => !models.has(id) && status !== 'retired').map(({ id }) => id);
   return {

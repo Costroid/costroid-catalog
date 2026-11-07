@@ -1,4 +1,3 @@
-import { fallbackRows } from '../lib/rows.mjs';
 import { dayAfter, isoDate, moneyOf, parseTables, requireMatch, sections, stripMarkup } from '../lib/markdown.mjs';
 
 export const META = { sheet: 'github-copilot', serviceProviderName: 'GitHub' };
@@ -106,13 +105,6 @@ export function parse(pages, factory) {
     }),
   );
 
-  rows.push(
-    ...fallbackRows(factory, pricing, rows, {
-      inScope: () => true,
-      basis: 'Highest default-tier list price per token class across every token model on the page.',
-    }),
-  );
-
   return {
     rows,
     omissions: [
@@ -125,7 +117,7 @@ export function parse(pages, factory) {
         reason: 'The page publishes one "Cache write" column with no duration. Rows carry cache_write_unspecified.',
       },
       { item: 'Batch, data-residency and reasoning rows', reason: 'Not on the page.' },
-      { item: 'GPT Image 2.5 Flare', reason: 'On the page, outside the text-token scope of release 0.1.' },
+      { item: 'GPT Image 2.5 Flare', reason: 'On the page, outside the text-token scope of the catalog.' },
       { item: 'Copilot code review per-review figures', reason: 'The page calls them estimates, not prices.' },
     ],
   };

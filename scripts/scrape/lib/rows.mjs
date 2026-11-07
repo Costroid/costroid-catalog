@@ -1,4 +1,3 @@
-import { maxDecimal } from './decimal.mjs';
 
 export const TOKENS = '1000000 Tokens';
 export const CURRENCY = 'USD';
@@ -122,28 +121,3 @@ function withoutKey({ key, ...rest }) {
   return rest;
 }
 
-// The unknown-model tier: for each token class, the highest list price among the rows `inScope` selects.
-// A scheduled rise counts, so a sheet pinned past its date never prices an unknown model below the known ones.
-export function fallbackRows(factory, source, rows, { inScope, basis }) {
-  const eligible = rows.filter(
-    (row) =>
-      row.RowType === 'unit_price' &&
-      row.ServiceTier === 'standard' &&
-      row.RegionId === 'global' &&
-      row.ContextTierMinInputTokens === null &&
-      row.PricingUnit === TOKENS &&
-      row.ModelStatus !== 'retired' &&
-      inScope(row),
-  );
-  const classes = [...new Set(eligible.map((row) => row.TokenClass))].sort();
-  if (classes.length === 0) throw new Error('fallback scope selected no rows');
-  return classes.map((TokenClass) =>
-    factory.fallback(source, {
-      TokenClass,
-      ListUnitPrice: maxDecimal(
-        eligible.filter((row) => row.TokenClass === TokenClass).map((row) => row.ListUnitPrice),
-      ),
-      FallbackBasis: basis,
-    }),
-  );
-}
