@@ -1,5 +1,4 @@
-import { fallbackRows } from '../lib/rows.mjs';
-import { moneyOf, parseTables, requireMatch } from '../lib/markdown.mjs';
+import { dayAfter, isoDate, moneyOf, parseTables, requireMatch } from '../lib/markdown.mjs';
 
 export const META = { sheet: 'openai', serviceProviderName: 'OpenAI' };
 
@@ -16,7 +15,7 @@ const SECTIONS = [
   'Transcription models',
   'Tools',
   'Specialized models',
-  'Finetuning',
+  'Fine-tuning',
   'Cloud platforms',
 ];
 const PRICED_SECTIONS = new Set([
@@ -36,17 +35,77 @@ const CONTEXT_CLASSES = [
   ['12h write', 'cache_write_12h'],
 ];
 
+const TIER_HEADING = /^(Standard|Batch|Flex|Fast|Ultrafast)(?: pricing data)?$/;
+const TABLE_TITLE = /^(?:Grouped )?Pricing Table data$/;
+const SUBHEADINGS = new Set(['Speed']);
+const MARKDOWN_HEADING = /^#{1,6} (.+)$/;
+const TITLE_LINE = /^[A-Z][^.:;!?|<>[\]{}*]*[^.:;!?|<>[\]{}*\s]$/;
+const blank = (line) => line === undefined || line.trim() === '';
+
+// The page marks headings two ways: Markdown hashes, and a title-like line standing alone between blank lines.
+function headingAt(lines, index) {
+  const line = lines[index].trim();
+  const marked = MARKDOWN_HEADING.exec(line);
+  if (marked) return marked[1].trim();
+  return blank(lines[index - 1]) && blank(lines[index + 1]) && TITLE_LINE.test(line) ? line : null;
+}
+
+// Walks up from a table to its section. Every heading on the way must be one the parser knows,
+// so a renamed section stops the build instead of lending its table to the section above it.
 function locate(lines, tableLine) {
-  let section = null;
   let tier = null;
-  for (let index = tableLine; index >= 0 && !(section && tier); index -= 1) {
-    const line = lines[index].trim();
-    if (!section && SECTIONS.includes(line)) section = line;
-    const word = /^(?:#### )?(Standard|Batch|Flex|Fast|Ultrafast)$/.exec(line);
-    const data = /^### (Standard|Fast|Ultrafast) pricing data$/.exec(line);
-    if (!tier && (word || data)) tier = TIERS[(word ?? data)[1]];
+  for (let index = tableLine - 1; index >= 0; index -= 1) {
+    const heading = headingAt(lines, index);
+    if (heading === null) continue;
+    const tierWord = TIER_HEADING.exec(heading)?.[1];
+    if (tierWord) tier ??= TIERS[tierWord];
+    else if (SECTIONS.includes(heading)) return { section: heading, tier: tier ?? 'standard' };
+    else if (!TABLE_TITLE.test(heading) && !SUBHEADINGS.has(heading))
+      throw new Error(`openai: unknown heading ${JSON.stringify(heading)} above the table at line ${tableLine + 1}`);
   }
-  return { section, tier: tier ?? 'standard' };
+  throw new Error(`openai: no section above the table at line ${tableLine + 1}`);
+}
+
+const PROMOTIONS = { 'gpt-5.6-sol': 'GPT-5\\.6 Sol’s', 'gpt-6-astra-law': 'GPT-6 Astra for Law' };
+const DATE = '([A-Z][a-z]+ \\d{1,2}, \\d{4})';
+
+// "available until November 30, 2026" and "available at least through December 31, 2026" both close
+// the promotional row after that day. Past it the page states no price, so the fallback applies.
+function promotion(page, name) {
+  const [, words, date] = requireMatch(
+    page,
+    new RegExp(`${name} promotional pricing is available (until|at least through) ${DATE}\\.`),
+    `${name.replaceAll('\\', '')} promotion`,
+  );
+  return { EffectiveEnd: dayAfter(isoDate(date)), Note: `Promotional price, available ${words} ${date}.` };
+}
+
+const MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+// The page has said "Starting Nov 1, 2026, FedRAMP endpoints are also charged" and, later, the same without the date.
+function fedramp(page) {
+  const [, month, day] = requireMatch(
+    page,
+    /(?:Starting ([A-Z][a-z]{2}) (\d{1,2}, \d{4}), )?FedRAMP endpoints are also charged a 10% uplift\./,
+    'FedRAMP uplift',
+  );
+  if (!month) return {};
+  const name = MONTHS.find((candidate) => candidate.startsWith(month));
+  if (!name) throw new Error(`openai: unreadable FedRAMP start month ${JSON.stringify(month)}`);
+  return { EffectiveStart: isoDate(`${name} ${day}`) };
 }
 
 const statusIn = (section) => (LIMITED_SECTIONS.has(section) ? 'limited' : 'unstated');
@@ -63,33 +122,11 @@ export function parse(pages, factory) {
         'context threshold',
       )[1],
     ) * 1000;
-  const promotions = new Map([
-    [
-      'gpt-5.6-sol',
-      requireMatch(
-        page,
-        /GPT-5\.6 Sol’s promotional pricing is available at least through ([A-Z][a-z]+ \d+, \d{4})\./,
-        'GPT-5.6 Sol promotion',
-      )[1],
-    ],
-    [
-      'gpt-6-astra-law',
-      requireMatch(
-        page,
-        /GPT-6 Astra for Law promotional pricing is available at least through ([A-Z][a-z]+ \d+, \d{4})\./,
-        'GPT-6 Astra for Law promotion',
-      )[1],
-    ],
-  ]);
+  const promotions = new Map(Object.entries(PROMOTIONS).map(([ModelId, name]) => [ModelId, promotion(page, name)]));
 
   const byId = new Map();
-  const flagship = new Set();
   const add = (fields) => {
-    const promotion = promotions.get(fields.ModelId);
-    const row = factory.price(
-      pricing,
-      promotion ? { ...fields, Note: `Promotional price, available at least through ${promotion}.` } : fields,
-    );
+    const row = factory.price(pricing, { ...fields, ...promotions.get(fields.ModelId) });
     const seen = byId.get(row.SkuPriceId);
     if (seen && seen.ListUnitPrice !== row.ListUnitPrice) throw new Error(`openai: ${row.SkuPriceId} has two prices`);
     byId.set(row.SkuPriceId, row);
@@ -99,9 +136,6 @@ export function parse(pages, factory) {
     const { section, tier } = locate(lines, table.line);
     if (!PRICED_SECTIONS.has(section)) continue;
     const isContextTable = table.header.includes('Short context input');
-    if (isContextTable && section === 'Flagship models' && tier === 'standard') {
-      for (const row of table.rows) flagship.add(row.Model.replace(/ \(.*$/, ''));
-    }
     for (const row of table.rows) {
       if (row.Category && !CHAT_CATEGORIES.has(row.Category)) continue;
       const ModelId = (row.Model ?? row['Model configuration']).replace(/ \(.*$/, '');
@@ -135,7 +169,7 @@ export function parse(pages, factory) {
     /Regional processing \(data residency\) endpoints are charged a 10% uplift for models released on or after ([A-Z][a-z]+ \d+, \d{4})/,
     'data residency uplift',
   )[1];
-  requireMatch(page, /Starting Nov 1, 2026, FedRAMP endpoints are also charged a 10% uplift\./, 'FedRAMP uplift');
+  const fedrampStart = fedramp(page);
   rows.push(
     factory.multiplier(pricing, {
       key: 'data-residency',
@@ -149,7 +183,7 @@ export function parse(pages, factory) {
       ModifierKind: 'data_residency',
       RegionId: 'fedramp',
       Multiplier: '1.1',
-      EffectiveStart: '2026-11-01',
+      ...fedrampStart,
       Condition: 'FedRAMP endpoints.',
     }),
   );
@@ -189,14 +223,6 @@ export function parse(pages, factory) {
   requireMatch(reasoning.text, /billed as \[output\s+tokens\]/, 'reasoning billing');
   rows.push(factory.reasoning(reasoning, { key: 'reasoning-tokens' }));
 
-  rows.push(
-    ...fallbackRows(factory, pricing, rows, {
-      inScope: (row) => flagship.has(row.ModelId),
-      basis:
-        'Highest standard-tier, short-context list price per token class across the first table of the Flagship models section.',
-    }),
-  );
-
   return {
     rows,
     omissions: [
@@ -207,7 +233,7 @@ export function parse(pages, factory) {
       },
       {
         item: 'Realtime, audio, image, transcription, GPT-Live, embedding, moderation and fine-tuning prices',
-        reason: 'On the page, outside the text-token scope of release 0.1.',
+        reason: 'On the page, outside the text-token scope of the catalog.',
       },
       {
         item: 'Containers (Hosted Shell, Code Interpreter) and file search storage',

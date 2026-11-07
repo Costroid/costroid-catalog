@@ -1,0 +1,32 @@
+name: watch
+
+# Reads the provider pages once a day and fails, with the row diff in the log, when they no longer
+# build to the newest release. The pages stay in the runner's temporary directory: this job commits,
+# uploads and opens nothing.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Fetch the provider pages
+        run: |
+          cp -R scripts/scrape "$RUNNER_TEMP/scrape"
+          node "$RUNNER_TEMP/scrape/fetch.mjs"
+      - name: Compare their rows with the newest release
+        run: node scripts/scrape/build.mjs --diff --pages "$RUNNER_TEMP/scrape/testdata"

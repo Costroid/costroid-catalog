@@ -1,5 +1,4 @@
-import { fallbackRows } from '../lib/rows.mjs';
-import { dayAfter, isoDate, parseTables, sections, stripMarkup } from '../lib/markdown.mjs';
+import { dayAfter, isoDate, sections, stripMarkup } from '../lib/markdown.mjs';
 
 export const META = { sheet: 'google', serviceProviderName: 'Google' };
 
@@ -28,12 +27,7 @@ const KNOWN_QUALIFIER =
 
 // One cell can hold several prices: dated steps, prompt-length tiers, modalities and a storage price.
 export function readPriceCell(cell) {
-  const text = cell
-    .replaceAll('\\<', '<')
-    .replaceAll('\\>', '>')
-    .replace(/\^\\\*.*$/, '')
-    .trim();
-  const pieces = text.split('$').slice(1);
+  const pieces = cell.trim().split('$').slice(1);
   const found = [];
   for (const piece of pieces) {
     const [, amount, rest] = /^(\d+(?:\.\d+)?)\s*(.*)$/s.exec(piece);
@@ -52,15 +46,59 @@ export function readPriceCell(cell) {
 }
 
 const plainHeading = (heading) =>
-  stripMarkup(heading)
+  stripMarkup(heading.replace(/\{%.*?%\}/g, ''))
     .replace(/[^\x20-\x7E]/g, '')
     .trim();
 
+// The ids sit in one italic run of links under the heading, which can wrap over several lines.
 const idsOf = (body) => {
-  const line = body.split('\n').find((candidate) => candidate.startsWith('*['));
-  if (!line) throw new Error(`google: no model id in ${body.slice(0, 80)}`);
-  return [...line.matchAll(/`([a-z0-9.-]+)`/g)].map((match) => match[1]);
+  const run = /^\s*\*\[[\s\S]*?\)\*$/m.exec(body);
+  if (!run) throw new Error(`google: no model id in ${body.slice(0, 80)}`);
+  return [...run[0].matchAll(/`([a-z0-9.-]+)`/g)].map((match) => match[1]);
 };
+
+const DEPRECATED = /\{% callout type="caution" %\}(?:(?!\{% \/callout %\})[\s\S])*\bdeprecated\b/;
+
+const cellText = (lines) =>
+  lines
+    .join(' ')
+    .replace(/\{% sup %\}.*?\{% \/sup %\}/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+// A Markdoc table: "* " opens a cell, a line of "---" closes a row, and any other line continues the cell.
+function markdocTable(source) {
+  const rows = source
+    .split(/^\s*---\s*$/m)
+    .map((block) => {
+      const cells = [];
+      for (const line of block.split('\n').filter((candidate) => candidate.trim() !== '')) {
+        const opened = /^\s*\* (.*)$/.exec(line);
+        if (opened) cells.push([opened[1]]);
+        else if (cells.length > 0) cells.at(-1).push(line.trim());
+        else throw new Error(`google: text before the first cell: ${JSON.stringify(line.trim())}`);
+      }
+      return cells.map(cellText);
+    })
+    .filter((cells) => cells.length > 0);
+  const [header, ...body] = rows;
+  for (const cells of body) {
+    if (cells.length !== header.length)
+      throw new Error(`google: a row of ${cells.length} cells under ${header.length} columns: ${cells[0]}`);
+  }
+  return { header, rows: body.map((cells) => Object.fromEntries(header.map((name, at) => [name, cells[at]]))) };
+}
+
+// Each tier is a tab holding one table.
+function tierTables(body) {
+  const tabs = [...body.matchAll(/\{% tab title="([^"]+)" %\}([\s\S]*?)\{% \/tab %\}/g)];
+  if (tabs.length === 0) throw new Error(`google: no tier tabs in ${body.slice(0, 80)}`);
+  return tabs.map(([, tierName, tab]) => {
+    const table = /\{% table %\}([\s\S]*?)\{% \/table %\}/.exec(tab);
+    if (!table) throw new Error(`google: no table in the ${tierName} tab`);
+    return { tierName, table: markdocTable(table[1]) };
+  });
+}
 
 const paidColumn = ({ header }) => {
   const column = header.find((name) => name.startsWith('Paid Tier'));
@@ -77,15 +115,15 @@ export function parse(pages, factory) {
 
   for (const { heading, body } of sections(pricing.text, 2)) {
     if (NOT_TEXT_MODEL.test(heading)) {
-      if (!/Pricing for|Notes/.test(heading)) omittedHeadings.push(heading);
+      if (!/Pricing for|Notes/.test(heading)) omittedHeadings.push(plainHeading(heading));
       continue;
     }
     const ids = idsOf(body);
-    const ModelStatus = /Preview/.test(heading) ? 'preview' : 'unstated';
-    for (const { heading: tierName, body: tierBody } of sections(body, 3)) {
+    const ModelName = plainHeading(heading);
+    const ModelStatus = DEPRECATED.test(body) ? 'deprecated' : /Preview/.test(heading) ? 'preview' : 'unstated';
+    for (const { tierName, table } of tierTables(body)) {
       const ServiceTier = TIERS[tierName];
-      if (!ServiceTier) throw new Error(`google: unknown tier ${tierName} under ${heading}`);
-      const table = parseTables(tierBody)[0];
+      if (!ServiceTier) throw new Error(`google: unknown tier ${tierName} under ${ModelName}`);
       const paid = paidColumn(table);
       for (const row of table.rows) {
         const label = row[table.header[0]];
@@ -106,7 +144,7 @@ export function parse(pages, factory) {
             rows.push(
               factory.price(pricing, {
                 ModelId,
-                ModelName: heading,
+                ModelName,
                 ModelStatus,
                 ServiceTier,
                 ...scope,
@@ -123,20 +161,12 @@ export function parse(pages, factory) {
   if (thinkingIncluded.size === 0) throw new Error('google: no output row says thinking tokens are included');
   rows.push(factory.reasoning(pricing, { key: 'thinking-tokens', AppliesToModels: [...thinkingIncluded] }));
 
-  rows.push(
-    ...fallbackRows(factory, pricing, rows, {
-      inScope: (row) => row.TokenClass !== 'cache_storage',
-      basis:
-        'Highest paid-tier standard list price per token class across every text model on the page, scheduled rises included.',
-    }),
-  );
-
   return {
     rows,
     omissions: [
       {
-        item: omittedHeadings.map(plainHeading).join('; '),
-        reason: 'On the page, outside the text-token scope of release 0.1.',
+        item: omittedHeadings.join('; '),
+        reason: 'On the page, outside the text-token scope of the catalog.',
       },
       ...[...thinkingUnstated].map((id) => ({
         item: `reasoning billing for ${id}`,
@@ -144,7 +174,7 @@ export function parse(pages, factory) {
       })),
       {
         item: 'Audio and video input rates inside text models',
-        reason: 'On the page, outside the text-token scope of release 0.1.',
+        reason: 'On the page, outside the text-token scope of the catalog.',
       },
       {
         item: 'cache_write_5m and cache_write_1h',
