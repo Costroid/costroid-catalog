@@ -136,6 +136,100 @@ const parseOpenai = (text) =>
 
 const handRow = (rows, id) => rows.find(({ SkuPriceId }) => SkuPriceId === id);
 
+const tab = (title, input, output) => [
+  `  {% tab title="${title}" %}`,
+  '  {% table %}',
+  '  * Feature',
+  '  * Free Tier',
+  '  * Paid Tier, per 1M tokens in USD{% sup %}*{% /sup %}',
+  '',
+  '  ---',
+  '',
+  '  * Input price',
+  '  * Not available',
+  ...input,
+  '',
+  '  ---',
+  '',
+  '  * Output price (including thinking tokens)',
+  '  * Not available',
+  ...output,
+  '  {% /table %}',
+  '  {% /tab %}',
+  '',
+];
+
+const parseGoogle = (text) =>
+  googleParser.parse({ 'google-pricing': handWritten(text) }, factoryFor(googleParser.META)).rows;
+
+const ROUTE_TO_FLASH = [
+  '  Gemini 2.5 Pro (`gemini-2.5-pro`) is',
+  '  [deprecated](/docs/deprecations#gemini-2.5-pro-models) and is no longer',
+  '  available to select in Google AI Studio. Effective December 1, 2026, all API',
+  '  requests to `gemini-2.5-pro` will automatically route to',
+  '  [Gemini 3.8 Flash (`gemini-3.8-flash`)](/docs/models/gemini-3.8-flash) and be',
+  '  billed at [Gemini 3.8 Flash rates](/docs/pricing#gemini-3.8-flash).',
+];
+
+function reroutePage(callout = ROUTE_TO_FLASH) {
+  return [
+    '# Gemini Developer API pricing',
+    '',
+    '## Gemini 3.8 Flash  {% id="gemini-3.8-flash" %}',
+    '',
+    '*[`gemini-3.8-flash`](/docs/models/gemini-3.8-flash)*',
+    '',
+    '{% tabs %}',
+    ...tab(
+      'Standard',
+      ['  * $0.75 through December 31, 2026.', '  $1.50 starting January 1, 2027.'],
+      ['  * $3.75 through December 31, 2026.', '  $7.50 starting January 1, 2027.'],
+    ),
+    ...tab('Contributor', ['  * $0.375'], ['  * $1.875']),
+    '{% /tabs %}',
+    '',
+    '## Gemini 2.5 Pro  {% id="gemini-2.5-pro" %}',
+    '',
+    '*[`gemini-2.5-pro`](/docs/models/gemini-2.5-pro)*',
+    '',
+    '{% callout type="caution" %}',
+    ...callout,
+    '',
+    '{% /callout %}',
+    '',
+    '{% tabs %}',
+    ...tab(
+      'Standard',
+      ['  * $1.25, prompts <= 200k tokens', '  $2.50, prompts > 200k tokens'],
+      ['  * $10.00, prompts <= 200k tokens', '  $15.00, prompts > 200k'],
+    ),
+    '{% /tabs %}',
+    '',
+  ].join('\n');
+}
+
+// The rate a sheet answers for one request: the single row whose tier, context range and dates hold.
+function rateOn(sheetRows, { model, tier = 'standard', tokenClass, date, inputTokens = 1000 }) {
+  const holding = sheetRows.filter(
+    (row) =>
+      row.RowType === 'unit_price' &&
+      row.PricingUnit === '1000000 Tokens' &&
+      row.ModelId === model &&
+      row.ServiceTier === tier &&
+      row.TokenClass === tokenClass &&
+      (row.ContextTierMinInputTokens ?? 0) < inputTokens &&
+      inputTokens <= (row.ContextTierMaxInputTokens ?? Infinity) &&
+      row.EffectiveStart <= date &&
+      (row.EffectiveEnd === null || date < row.EffectiveEnd),
+  );
+  assert.equal(
+    holding.length,
+    1,
+    `${model} ${tier} ${tokenClass} ${date}: ${holding.map(({ SkuPriceId }) => SkuPriceId)}`,
+  );
+  return holding[0];
+}
+
 describe('parsers on hand-written pages', () => {
   test('throws on an unknown heading before a priced table', () => {
     const renamed = openaiPage({
@@ -198,28 +292,6 @@ describe('parsers on hand-written pages', () => {
   });
 
   test('reads a model from the Markdoc page', () => {
-    const tab = (title, input, output) => [
-      `  {% tab title="${title}" %}`,
-      '  {% table %}',
-      '  * Feature',
-      '  * Free Tier',
-      '  * Paid Tier, per 1M tokens in USD{% sup %}*{% /sup %}',
-      '',
-      '  ---',
-      '',
-      '  * Input price',
-      '  * Not available',
-      ...input,
-      '',
-      '  ---',
-      '',
-      '  * Output price (including thinking tokens)',
-      '  * Not available',
-      ...output,
-      '  {% /table %}',
-      '  {% /tab %}',
-      '',
-    ];
     const page = [
       '# Gemini Developer API pricing',
       '',
@@ -255,7 +327,7 @@ describe('parsers on hand-written pages', () => {
       '{% /tabs %}',
       '',
     ].join('\n');
-    const { rows } = googleParser.parse({ 'google-pricing': handWritten(page) }, factoryFor(googleParser.META));
+    const rows = parseGoogle(page);
     const long = handRow(rows, 'google:gemini-9-pro-customtools:global:standard:over-200000:input_uncached');
     assert.equal(long.ListUnitPrice, '4.00');
     assert.equal(long.ModelName, 'Gemini 9 Pro');
@@ -272,6 +344,81 @@ describe('parsers on hand-written pages', () => {
       'gemini-9-pro-customtools',
       'gemini-2.5-pro',
     ]);
+  });
+
+  test("a rerouted Gemini model bills at its successor's rate from the reroute date", () => {
+    const rows = parseGoogle(reroutePage());
+    const ask = (model, date, inputTokens) => rateOn(rows, { model, tokenClass: 'output', date, inputTokens });
+    assert.equal(ask('gemini-2.5-pro', '2026-11-30', 1000).ListUnitPrice, '10.00');
+    assert.equal(ask('gemini-2.5-pro', '2026-11-30', 300000).ListUnitPrice, '15.00');
+    for (const date of ['2026-12-01', '2026-12-31', '2027-01-01', '2028-01-01']) {
+      for (const inputTokens of [1000, 300000]) {
+        assert.equal(
+          ask('gemini-2.5-pro', date, inputTokens).ListUnitPrice,
+          ask('gemini-3.8-flash', date).ListUnitPrice,
+        );
+      }
+    }
+    const routed = handRow(rows, 'google:gemini-2.5-pro:global:standard:all:output:from-2026-12-01');
+    assert.equal(routed.ListUnitPrice, '3.75');
+    assert.equal(routed.EffectiveEnd, '2027-01-01');
+    assert.equal(routed.ModelName, 'Gemini 2.5 Pro');
+    assert.equal(routed.ModelStatus, 'deprecated');
+    assert.equal(routed.SourceUrl, 'https://example.com/pricing.md');
+    assert.equal(
+      routed.Note,
+      'Effective December 1, 2026, all API requests to gemini-2.5-pro will automatically route to Gemini 3.8 Flash (gemini-3.8-flash) and be billed at Gemini 3.8 Flash rates.',
+    );
+    assert.equal(
+      handRow(rows, 'google:gemini-2.5-pro:global:standard:all:output:from-2027-01-01').ListUnitPrice,
+      '7.50',
+    );
+    assert.equal(
+      handRow(rows, 'google:gemini-2.5-pro:global:contributor:all:output:from-2026-12-01').ListUnitPrice,
+      '1.875',
+    );
+    assert.equal(handRow(rows, 'google:gemini-2.5-pro:global:standard:to-200000:output').EffectiveEnd, '2026-12-01');
+    assert.equal(handRow(rows, 'google:gemini-2.5-pro:global:standard:over-200000:output').Note, routed.Note);
+
+    const google = readRelease('0.3.0').find(({ Provider }) => Provider === 'google');
+    const published = (request) => rateOn(google.rows, request).ListUnitPrice;
+    for (const [model, successor] of [
+      ['gemini-2.5-pro', 'gemini-3.8-flash'],
+      ['gemini-2.5-flash', 'gemini-3.5-flash-lite'],
+    ]) {
+      for (const tier of ['standard', 'batch', 'flex', 'priority', 'contributor']) {
+        for (const tokenClass of ['input_uncached', 'output', 'cache_read']) {
+          for (const date of ['2026-12-01', '2026-12-31', '2027-01-01', '2028-01-01']) {
+            const request = { tier, tokenClass, date };
+            assert.equal(published({ ...request, model }), published({ ...request, model: successor }));
+          }
+        }
+      }
+    }
+    assert.equal(published({ model: 'gemini-2.5-pro', tokenClass: 'output', date: '2026-11-30' }), '10.00');
+    assert.equal(published({ model: 'gemini-2.5-pro', tokenClass: 'output', date: '2026-12-01' }), '3.75');
+    assert.equal(
+      published({ model: 'gemini-2.5-pro', tokenClass: 'output', date: '2026-12-01', inputTokens: 300000 }),
+      '3.75',
+    );
+    assert.equal(published({ model: 'gemini-2.5-pro', tokenClass: 'output', date: '2027-01-01' }), '7.50');
+    assert.equal(
+      published({ model: 'gemini-2.5-flash', tier: 'batch', tokenClass: 'cache_read', date: '2026-11-30' }),
+      '0.03',
+    );
+    assert.equal(
+      published({ model: 'gemini-2.5-flash', tier: 'batch', tokenClass: 'cache_read', date: '2026-12-01' }),
+      '0.015',
+    );
+  });
+
+  test('a reroute the parser cannot read stops the build', () => {
+    const reworded = ROUTE_TO_FLASH.map((line) => line.replace('will automatically route to', 'will route to'));
+    assert.throws(() => parseGoogle(reroutePage(reworded)), /unread reroute under Gemini 2\.5 Pro/);
+    const billedElsewhere = ROUTE_TO_FLASH.map((line) => line.replace('pricing#gemini-3.8-flash', 'pricing#gemini-9'));
+    assert.throws(() => parseGoogle(reroutePage(billedElsewhere)), /routes to gemini-3\.8-flash but bills at gemini-9/);
+    const nowhere = ROUTE_TO_FLASH.map((line) => line.replaceAll('gemini-3.8-flash', 'gemini-9-flash'));
+    assert.throws(() => parseGoogle(reroutePage(nowhere)), /routes to gemini-9-flash, which has no price/);
   });
 
   const cursorPage = [
@@ -504,7 +651,7 @@ describe('Anthropic sheet, read against the page by hand', needsPages, () => {
       before.find(({ SkuPriceId }) => SkuPriceId === kept.SkuPriceId),
     );
     assert.ok(!pages['anthropic-pricing'].text.includes('Claude Haiku 3.5'));
-    const { leftThePage } = releaseDiff(readRelease(PREVIOUS), sheets);
+    const { leftThePage } = releaseDiff(readRelease('0.1.0'), sheets);
     assert.ok(leftThePage.some(({ row }) => row.SkuPriceId === kept.SkuPriceId));
     assert.ok(
       leftThePage.some(({ row }) => row.SkuPriceId === 'anthropic:tool-overhead:claude-3-5-haiku-20241022:auto_none'),
@@ -796,8 +943,11 @@ describe('the scrape job', needsPages, () => {
 
   test('a new page row shows as added and a dropped one as removed', () => {
     const moved = changed('openai-pricing', /\| gpt-6-cyber \|[^\n]*\n/, '');
-    const { removed } = diffSheets(sheets, buildSheets(moved).sheets);
-    assert.ok(removed.some(({ row }) => row.SkuPriceId === 'openai:gpt-6-cyber:global:standard:to-272000:output'));
+    const id = 'openai:gpt-6-cyber:global:standard:to-272000:output';
+    const { removed } = diffSheets(sheets, buildSheets(moved, { previous: [] }).sheets);
+    assert.ok(removed.some(({ row }) => row.SkuPriceId === id));
+    const kept = diffSheets(sheets, buildSheets(moved, { previous: sheets }).sheets);
+    assert.ok(!kept.removed.some(({ row }) => row.SkuPriceId === id));
   });
 
   test('a page that lost its table stops the build instead of emptying a sheet', () => {

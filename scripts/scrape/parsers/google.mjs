@@ -59,6 +59,77 @@ const idsOf = (body) => {
 
 const DEPRECATED = /\{% callout type="caution" %\}(?:(?!\{% \/callout %\})[\s\S])*\bdeprecated\b/;
 
+const CAUTION = /\{% callout type="caution" %\}((?:(?!\{% \/callout %\})[\s\S])*)\{% \/callout %\}/g;
+const ROUTE = new RegExp(
+  `Effective ${DATE}, all API requests to \`([a-z0-9.-]+)\` will automatically route to [^\`]*\`([a-z0-9.-]+)\`[^\`]*? and be billed at \\[[^\\]]*\\]\\(/docs/pricing#([a-z0-9.-]+)\\)\\.`,
+);
+
+// A caution callout can say that requests to a model id route to another model and bill at its rates from a date.
+function reroutesIn(body, ids, ModelName) {
+  const routes = [];
+  for (const [, callout] of body.matchAll(CAUTION)) {
+    const words = callout.replace(/\s+/g, ' ');
+    if (!/\broute\b/.test(words)) continue;
+    const match = ROUTE.exec(words);
+    if (!match) throw new Error(`google: unread reroute under ${ModelName}: ${JSON.stringify(words.trim())}`);
+    const [sentence, date, from, to, billedAs] = match;
+    if (!ids.includes(from)) throw new Error(`google: ${ModelName} reroutes ${from}, which it does not list`);
+    if (billedAs !== to) throw new Error(`google: ${from} routes to ${to} but bills at ${billedAs}`);
+    routes.push({ from, to, date: isoDate(date), Note: stripMarkup(sentence).replaceAll('`', '') });
+  }
+  return routes;
+}
+
+const PROVENANCE = new Set([
+  'RowType',
+  'SkuPriceId',
+  'ServiceProviderName',
+  'SourceUrl',
+  'RetrievalDate',
+  'SourceSha256',
+]);
+const fieldsOf = (row) => Object.fromEntries(Object.entries(row).filter(([field]) => !PROVENANCE.has(field)));
+const endsAfter = ({ EffectiveEnd }, date) => EffectiveEnd === null || EffectiveEnd > date;
+
+// A rerouted model's rows end on the reroute date. From that date its id is priced at every row of the
+// successor that holds after it, tier by tier, each starting no earlier than the reroute.
+function reroute(rows, routes, pricing, factory) {
+  const routeOf = new Map(routes.map((route) => [route.from, route]));
+  for (const { from, to } of routes) {
+    if (routeOf.has(to)) throw new Error(`google: ${from} routes to ${to}, which routes again`);
+    if (!rows.some(({ ModelId }) => ModelId === to))
+      throw new Error(`google: ${from} routes to ${to}, which has no price`);
+  }
+  const lastRow = new Map(rows.map(({ ModelId }, at) => [ModelId, at]));
+  const result = [];
+  rows.forEach((row, at) => {
+    const route = routeOf.get(row.ModelId);
+    if (!route) {
+      result.push(row);
+      return;
+    }
+    if (row.EffectiveStart < route.date) {
+      const EffectiveEnd = endsAfter(row, route.date) ? route.date : row.EffectiveEnd;
+      result.push(factory.price(pricing, { ...fieldsOf(row), EffectiveEnd, Note: route.Note }));
+    }
+    if (lastRow.get(row.ModelId) !== at) return;
+    const successor = rows.filter((candidate) => candidate.ModelId === route.to && endsAfter(candidate, route.date));
+    for (const rate of successor) {
+      result.push(
+        factory.price(pricing, {
+          ...fieldsOf(rate),
+          ModelId: row.ModelId,
+          ModelName: row.ModelName,
+          ModelStatus: row.ModelStatus,
+          EffectiveStart: rate.EffectiveStart > route.date ? rate.EffectiveStart : route.date,
+          Note: route.Note,
+        }),
+      );
+    }
+  });
+  return result;
+}
+
 const cellText = (lines) =>
   lines
     .join(' ')
@@ -112,6 +183,7 @@ export function parse(pages, factory) {
   const omittedHeadings = [];
   const thinkingIncluded = new Set();
   const thinkingUnstated = new Set();
+  const routes = [];
 
   for (const { heading, body } of sections(pricing.text, 2)) {
     if (NOT_TEXT_MODEL.test(heading)) {
@@ -121,6 +193,7 @@ export function parse(pages, factory) {
     const ids = idsOf(body);
     const ModelName = plainHeading(heading);
     const ModelStatus = DEPRECATED.test(body) ? 'deprecated' : /Preview/.test(heading) ? 'preview' : 'unstated';
+    routes.push(...reroutesIn(body, ids, ModelName));
     for (const { tierName, table } of tierTables(body)) {
       const ServiceTier = TIERS[tierName];
       if (!ServiceTier) throw new Error(`google: unknown tier ${tierName} under ${ModelName}`);
@@ -158,11 +231,12 @@ export function parse(pages, factory) {
     }
   }
 
+  const priced = reroute(rows, routes, pricing, factory);
   if (thinkingIncluded.size === 0) throw new Error('google: no output row says thinking tokens are included');
-  rows.push(factory.reasoning(pricing, { key: 'thinking-tokens', AppliesToModels: [...thinkingIncluded] }));
+  priced.push(factory.reasoning(pricing, { key: 'thinking-tokens', AppliesToModels: [...thinkingIncluded] }));
 
   return {
-    rows,
+    rows: priced,
     omissions: [
       {
         item: omittedHeadings.join('; '),
