@@ -122,8 +122,29 @@ function previousOf(version) {
   return before ? readRelease(before) : [];
 }
 
-// With no options, the build of the newest release from its own pages.
-export function buildSheets(
+function buildSheet(parser, pages, { version, previous, sheetDate }) {
+  const { sheet, serviceProviderName } = parser.META;
+  const factory = makeRowFactory({ provider: sheet, serviceProviderName, sheetDate });
+  const earlier = previous.find(({ Provider }) => Provider === sheet);
+  const parsed = parser.parse(pages, factory, earlier);
+  // The sheet's own fallback replaces any a parser states for its page alone.
+  const onPage = parsed.rows.filter(({ RowType }) => RowType !== 'fallback');
+  const rows = [...onPage, ...keptFrom(earlier, onPage)];
+  return {
+    sheet: {
+      $schema: `../../schema/v${SCHEMA_VERSION}/catalog.schema.json`,
+      SchemaVersion: SCHEMA_VERSION,
+      CatalogVersion: version,
+      Provider: sheet,
+      ServiceProviderName: serviceProviderName,
+      SheetDate: sheetDate,
+      rows: [...rows, ...boundingFallback(factory, rows)],
+    },
+    omissions: parsed.omissions.map((entry) => ({ provider: sheet, ...entry })),
+  };
+}
+
+function buildOptions(
   pages,
   {
     version = CATALOG_VERSION,
@@ -132,28 +153,45 @@ export function buildSheets(
   } = {},
 ) {
   versionParts(version);
+  return { version, previous, sheetDate };
+}
+
+// With no options, the build of the newest release from its own pages.
+export function buildSheets(pages, options) {
+  const resolved = buildOptions(pages, options);
+  const built = PARSERS.map((parser) => buildSheet(parser, pages, resolved));
+  return { sheets: built.map(({ sheet }) => sheet), omissions: built.flatMap(({ omissions }) => omissions) };
+}
+
+// Builds every sheet whose parser reads its page, and names each parser that cannot, with its error.
+export function buildEachSheet(pages, options) {
+  const resolved = buildOptions(pages, options);
   const sheets = [];
-  const omissions = [];
+  const failures = [];
   for (const parser of PARSERS) {
-    const { sheet, serviceProviderName } = parser.META;
-    const factory = makeRowFactory({ provider: sheet, serviceProviderName, sheetDate });
-    const parsed = parser.parse(pages, factory);
-    // The sheet's own fallback replaces any a parser states for its page alone.
-    const onPage = parsed.rows.filter(({ RowType }) => RowType !== 'fallback');
-    const earlier = previous.find(({ Provider }) => Provider === sheet);
-    const rows = [...onPage, ...keptFrom(earlier, onPage)];
-    sheets.push({
-      $schema: `../../schema/v${SCHEMA_VERSION}/catalog.schema.json`,
-      SchemaVersion: SCHEMA_VERSION,
-      CatalogVersion: version,
-      Provider: sheet,
-      ServiceProviderName: serviceProviderName,
-      SheetDate: sheetDate,
-      rows: [...rows, ...boundingFallback(factory, rows)],
-    });
-    omissions.push(...parsed.omissions.map((entry) => ({ provider: sheet, ...entry })));
+    try {
+      sheets.push(buildSheet(parser, pages, resolved).sheet);
+    } catch (error) {
+      failures.push({ provider: parser.META.sheet, message: error.message });
+    }
   }
-  return { sheets, omissions };
+  return { sheets, failures };
+}
+
+// A unit price that ends on a date with no row of the same model, tier, region and class starting that day.
+// From that day the sheet names no price for the model, so its fallback prices it.
+export function pricesEndingUnfollowed(sheets) {
+  const found = new Map();
+  for (const { Provider, rows } of sheets) {
+    const prices = rows.filter(({ RowType }) => RowType === 'unit_price');
+    const rate = (row) => [row.ModelId, row.ServiceTier, row.RegionId, row.TokenClass, row.PricingUnit].join(' ');
+    const starts = new Set(prices.map((row) => `${rate(row)} ${row.EffectiveStart}`));
+    for (const { ModelId, EffectiveEnd, ...row } of prices) {
+      if (EffectiveEnd === null || starts.has(`${rate({ ModelId, ...row })} ${EffectiveEnd}`)) continue;
+      found.set(`${Provider} ${ModelId} ${EffectiveEnd}`, { provider: Provider, model: ModelId, from: EffectiveEnd });
+    }
+  }
+  return [...found.values()];
 }
 
 // A start the page does not state is the day it was read, so it is left out of a comparison between two readings.

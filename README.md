@@ -6,7 +6,7 @@ Open, dated price sheets for LLM providers. [Costroid](https://github.com/Costro
 | ------------------- | ------------------------------------------------------------------------ |
 | `schema/v0.1/`      | The sheet schema, with columns named after FOCUS pricing columns         |
 | `sheets/<version>/` | One dated file per provider. Every price row carries its source          |
-| `reports/`          | The cross-check, the diff and the omissions for each release             |
+| `reports/`          | The sources, cross-check, diff and omissions of each release             |
 | `scripts/scrape/`   | The job that rebuilds a sheet from saved provider pages, with its tests  |
 
 ## Why it exists
@@ -15,7 +15,11 @@ A cost figure is only as good as its price. Each price here names the page it ca
 
 ## Sources
 
-Provider pages and third-party price lists are not published here, because their text belongs to their owners. `scripts/scrape/testdata/SOURCES.json` records each one's URL, retrieval date and SHA-256, and every price row carries the same three. A page read later may differ, because providers change them. `npm run fetch` saves the current pages, and `npm test` then runs the sheet tests. Without saved pages, those tests skip by name and the validator checks rows against `SOURCES.json` and each release's `reports/<version>-sources.json` alone.
+Provider pages and third-party price lists are not published here, because their text belongs to their owners. `reports/<version>-sources.json` records the pages a release was built from: each page's URL, retrieval time and SHA-256. Every price row carries the same URL, date and digest.
+
+`scripts/scrape/testdata/SOURCES.json` is the last local fetch. `npm run fetch` saves the current pages beside it and rewrites it. The committed copy names the pages of release 0.1.0, which predates the per-release record.
+
+A page read later may differ, because providers change them. `npm test` runs the sheet tests when the saved pages are the ones the newest release cites. Without them, those tests skip by name and the validator checks rows against `SOURCES.json` and each release's `reports/<version>-sources.json` alone.
 
 ## Install
 
@@ -38,6 +42,8 @@ It checks every sheet against the schema and prints one line per sheet with its 
 ## Versions
 
 A release is a directory under `sheets/`. A published release never changes in place. A customer pins a version.
+
+Each release from 0.2.0 on has a tag, `v<version>`. Release 0.1.0 predates tags.
 
 ## Licence
 

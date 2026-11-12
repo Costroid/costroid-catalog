@@ -49,22 +49,61 @@ function versionOf(name) {
 
 const FIRST_US_REGION_VERSION = 406;
 
-export function parse(pages, factory) {
+// Each row of the cache hit table names one or more models and their multiplier. "All other models"
+// restates the default, which must agree with the cache operation table.
+function cacheReadMultipliers(table, index, defaultRead) {
+  const own = [];
+  let others = null;
+  for (const row of table.rows) {
+    const multiplier = requireMatch(
+      row['Cache hit multiplier'],
+      /^([\d.]+)x$/,
+      `cache hit multiplier of ${row.Model}`,
+    )[1];
+    if (row.Model === 'All other models') {
+      others = multiplier;
+      continue;
+    }
+    const names = row.Model.split(/,? and |, /);
+    own.push({ ids: names.map((name) => resolveModel(name.trim(), index).id), multiplier });
+  }
+  if (others !== defaultRead)
+    throw new Error(`anthropic: the cache hit table gives other models ${others}x, the cache read row ${defaultRead}x`);
+  return own;
+}
+
+// A model the previous release read its own cache read multiplier for, still priced on the page, must still
+// have one. Without it, the default multiplier would price its cache reads and nothing would say so.
+function requireOwnReads(previous, ownReads, models) {
+  const covered = new Set(ownReads.flatMap(({ ids }) => ids));
+  const earlier = (previous?.rows ?? []).filter(
+    (row) => row.RowType === 'multiplier' && row.ModifierKind === 'prompt_cache' && row.AppliesToModels.length > 0,
+  );
+  for (const { AppliesToModels } of earlier) {
+    for (const id of AppliesToModels.filter((model) => models.has(model) && !covered.has(model)))
+      throw new Error(
+        `anthropic: ${id} had its own cache read multiplier in ${previous.CatalogVersion} and the page names none`,
+      );
+  }
+}
+
+export function parse(pages, factory, previous) {
   const pricing = pages['anthropic-pricing'];
   const page = pricing.text;
   const tables = parseTables(page);
   const index = statusIndex(pages['anthropic-model-status'].text);
   const rows = [];
   const models = new Map();
+  const limited = new Set();
 
   const describe = (cell) => {
     const name = displayName(cell);
     const entry = resolveModel(name, index);
-    const limited = cell.includes('limited availability');
+    if (cell.includes('limited availability')) limited.add(entry.id);
     const identity = {
       ModelId: entry.id,
       ModelName: name,
-      ModelStatus: limited ? 'limited' : entry.status,
+      ModelStatus: limited.has(entry.id) ? 'limited' : entry.status,
     };
     models.set(entry.id, name);
     return identity;
@@ -125,8 +164,9 @@ export function parse(pages, factory) {
   const cacheTable = findTable(tables, 'Cache operation');
   const multiplierOf = (operation) => {
     const row = cacheTable.rows.find((candidate) => candidate['Cache operation'] === operation);
-    return requireMatch(row.Multiplier, /^([\d.]+)x base input price/, operation)[1];
+    return requireMatch(row?.Multiplier ?? '', /^([\d.]+)x base input price/, operation)[1];
   };
+  const defaultRead = multiplierOf('Cache read (hit)');
   rows.push(
     factory.multiplier(pricing, {
       key: 'prompt-cache-write-5m',
@@ -145,14 +185,13 @@ export function parse(pages, factory) {
     factory.multiplier(pricing, {
       key: 'prompt-cache-read',
       ModifierKind: 'prompt_cache',
-      Multiplier: multiplierOf('Cache read (hit)'),
+      Multiplier: defaultRead,
       AppliesToTokenClasses: ['cache_read'],
       Condition: 'Multiplies the base input price, except on models a narrower row names.',
     }),
   );
-  const readCell = cacheTable.rows.find((row) => row['Cache operation'] === 'Cache read (hit)').Multiplier;
-  for (const [, multiplier, names] of readCell.matchAll(/([\d.]+)x on (Claude [^;)]+)/g)) {
-    const ids = names.split(' and ').map((name) => resolveModel(name.trim(), index).id);
+  const ownReads = cacheReadMultipliers(findTable(tables, 'Cache hit multiplier'), index, defaultRead);
+  for (const { ids, multiplier } of ownReads) {
     rows.push(
       factory.multiplier(pricing, {
         key: `prompt-cache-read-${ids[0]}`,
@@ -164,6 +203,7 @@ export function parse(pages, factory) {
       }),
     );
   }
+  requireOwnReads(previous, ownReads, models);
 
   requireMatch(page, /50 percent discount on both input and output tokens/, 'batch discount');
   rows.push(

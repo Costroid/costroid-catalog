@@ -13,18 +13,24 @@ import { diffSheets, renderDiff } from './lib/diff.mjs';
 import { moneyOf, parseTables, stripMarkup } from './lib/markdown.mjs';
 import { makeRowFactory } from './lib/rows.mjs';
 import {
+  buildEachSheet,
   buildSheets,
   CATALOG_VERSION,
+  compareVersions,
   loadPages,
   loadSources,
+  pricesEndingUnfollowed,
   readRelease,
   releaseBefore,
+  releases,
   releaseDiff,
   renderSheet,
   ROOT,
   sheetFileName,
   TESTDATA,
 } from './lib/sheets.mjs';
+import * as anthropicParser from './parsers/anthropic.mjs';
+import * as copilotParser from './parsers/copilot.mjs';
 import * as cursorParser from './parsers/cursor.mjs';
 import * as googleParser from './parsers/google.mjs';
 import * as openaiParser from './parsers/openai.mjs';
@@ -45,6 +51,8 @@ const pages = pagesSaved ? loadPages() : {};
 const { sheets } = pagesSaved ? buildSheets(pages) : { sheets: [] };
 const sheet = (provider) => sheets.find(({ Provider }) => Provider === provider);
 const PREVIOUS = releaseBefore(CATALOG_VERSION);
+// Release 0.1.0 predates the rule that the fallback is the highest price of its class. A published release never changes.
+const FIRST_RULED_RELEASE = '0.2.0';
 const BUILD = join(ROOT, 'scripts', 'scrape', 'build.mjs');
 
 function priceOf(provider, modelId, tokenClass, scope = {}) {
@@ -79,7 +87,12 @@ const factoryFor = ({ sheet, serviceProviderName }) =>
 function openaiPage({
   solPromotion = 'until November 30, 2026',
   fedramp = 'FedRAMP endpoints are also charged a 10% uplift.',
+  specialized = [],
   beforeTools = [],
+  webSearch = [
+    '| Web search | Web search (incl. images) | $10.00 / 1k calls + Search content tokens billed at model rates. |',
+    '| Web search | Web search preview (other models) | $25.00 / 1k calls + Search content tokens are free. |',
+  ],
 } = {}) {
   return [
     'Flagship models',
@@ -97,13 +110,18 @@ function openaiPage({
     '',
     `GPT-5.6 Sol’s promotional pricing is available ${solPromotion}.`,
     '',
-    'Legal model configurations',
+    'Specialized models',
+    '',
+    'Standard',
     '',
     '### Grouped Pricing Table data',
     '',
-    '| Model configuration | Input | Output | Cached input |',
-    '| --- | --- | --- | --- |',
-    '| gpt-6-astra-law | $10.00 | $50.00 | $1.00 |',
+    '| Category | Model | Input | Output | Cached input | 30m write | 12h write |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+    ...specialized,
+    '| <a id="legal-model-configurations"></a>Legal | gpt-6-astra-law | $10.00 | $50.00 | $1.00 | - | - |',
+    '| Embedding | text-embedding-3-small | $0.02 | - | - | - | - |',
+    '| Moderation | omni-moderation-latest | Free | - | - | - | - |',
     '',
     'GPT-6 Astra for Law promotional pricing is available at least through December 31, 2026.',
     '',
@@ -114,8 +132,7 @@ function openaiPage({
     '',
     '| Tool | Details | Pricing |',
     '| --- | --- | --- |',
-    '| Web search | Web search (all models) | $10.00 / 1k calls + Search content tokens billed at model rates. |',
-    '| Web search | Web search preview (non-reasoning models) | $25.00 / 1k calls + Search content tokens are free. |',
+    ...webSearch,
     '| File search | Tool call | $2.50 / 1k calls |',
     '',
     'Regional processing (data residency) endpoints are charged a 10% uplift for models released on or after March 5, 2026, that are eligible for data residency.',
@@ -161,6 +178,134 @@ const tab = (title, input, output) => [
 
 const parseGoogle = (text) =>
   googleParser.parse({ 'google-pricing': handWritten(text) }, factoryFor(googleParser.META)).rows;
+
+const ANTHROPIC_CACHE_HITS = [
+  '| Claude Fable 5.2 and Claude Mythos 5.2 | 0.025x | $0.20 USD |',
+  '| Claude Opus 5.5 | 0.05x | $0.20 USD |',
+  '| Claude Sonnet 5.5 | 0.05x | $0.10 USD |',
+];
+
+// cacheHits: null leaves out the per-model cache hit table, as the page printed before it had one.
+function anthropicPage({ cacheHits = ANTHROPIC_CACHE_HITS } = {}) {
+  const limited = ' ([limited availability](https://example.com/access))';
+  return [
+    '| Model | Base input tokens | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens |',
+    '| :-- | :-- | :-- | :-- | :-- | :-- |',
+    '| Claude Fable 5.2 | $8 / MTok | $10 / MTok | $16 / MTok | $0.20 / MTok<sup>1</sup> | $40 / MTok |',
+    `| Claude Mythos 5.2${limited} | $8 / MTok | $10 / MTok | $16 / MTok | $0.20 / MTok<sup>1</sup> | $40 / MTok |`,
+    '| Claude Opus 5.5 | $4 / MTok | $5 / MTok | $8 / MTok | $0.20 / MTok<sup>2</sup> | $20 / MTok |',
+    '| Claude Sonnet 5.5 | $2 / MTok | $2.50 / MTok | $4 / MTok | $0.10 / MTok<sup>2</sup> | $10 / MTok |',
+    '| Claude Haiku 4.5 | $1 / MTok | $1.25 / MTok | $2 / MTok | $0.10 / MTok | $5 / MTok |',
+    '',
+    '### Prompt caching',
+    '',
+    '| Cache operation | Multiplier | Duration |',
+    '| --- | --- | --- |',
+    '| 5-minute cache write | 1.25x base input price | 5 minutes |',
+    '| 1-hour cache write | 2x base input price | 1 hour |',
+    '| Cache read (hit) | 0.1x base input price on most models | Same as the write |',
+    '',
+    ...(cacheHits === null
+      ? []
+      : [
+          '| Model | Cache hit multiplier | Cache hit price per million tokens |',
+          '| --- | --- | --- |',
+          ...cacheHits,
+          '| All other models | 0.1x | See [Model pricing](https://example.com/pricing) |',
+          '',
+        ]),
+    'For Claude 4.6 and later models, specifying US-only inference through the `inference_geo` parameter incurs a 1.1x multiplier on all token pricing categories.',
+    '',
+    '### Fast mode pricing',
+    '',
+    '| Model | Input | Output |',
+    '| --- | --- | --- |',
+    '| Claude Fable 5.2 | $16 USD / MTok | $80 USD / MTok |',
+    '| Claude Mythos 5.2 | $16 USD / MTok | $80 USD / MTok |',
+    '| Claude Opus 5.5 | $8 USD / MTok | $40 USD / MTok |',
+    '',
+    '### Batch processing',
+    '',
+    'The Batch API allows asynchronous processing with a 50 percent discount on both input and output tokens.',
+    '',
+    '| Model | Batch input | Batch output |',
+    '| :-- | :-- | :-- |',
+    '| Claude Fable 5.2 | $4 / MTok | $20 / MTok |',
+    `| Claude Mythos 5.2${limited} | $4 / MTok | $20 / MTok |`,
+    '| Claude Sonnet 5.5 | $1 / MTok | $5 / MTok |',
+    '',
+    '| Model | Tool use system prompt tokens: auto, none | Tool use system prompt tokens: any, tool |',
+    '| :-- | :-- | :-- |',
+    '| Claude Opus 5.5 | 286 tokens | |',
+    '| Claude Sonnet 5.5 | 286 tokens | |',
+    '',
+    'Web search is available for **$10 USD per 1,000 searches**.',
+    'Additional usage is billed at **$0.05 USD per hour, per container**.',
+    '',
+    '| Usage | Rate | Billed while |',
+    '| --- | --- | --- |',
+    '| Session runtime | $0.08 USD per session-hour | running |',
+    '',
+    'Usage is converted to CCUs at $0.01 USD per CCU.',
+    '',
+  ].join('\n');
+}
+
+const ANTHROPIC_STATUS = [
+  '| API model name | Current state |',
+  '| --- | --- |',
+  '| claude-fable-5-2 | Active |',
+  '| claude-mythos-5-2 | Active |',
+  '| claude-opus-5-5 | Active |',
+  '| claude-sonnet-5-5 | Active |',
+  '| claude-haiku-4-5-20251001 | Active |',
+  '',
+].join('\n');
+
+const parseAnthropic = (text, previous) =>
+  anthropicParser.parse(
+    {
+      'anthropic-pricing': handWritten(text),
+      'anthropic-model-status': handWritten(ANTHROPIC_STATUS),
+      'anthropic-thinking': handWritten(
+        'With thinking on, the tokens Claude spends reasoning are billed as output tokens.',
+      ),
+    },
+    factoryFor(anthropicParser.META),
+    previous,
+  ).rows;
+
+function copilotPage() {
+  return [
+    '## Pricing tables',
+    '',
+    '### Google',
+    '',
+    '| Model | Release status | Category | Tier | Threshold (input tokens) | Input | Cached input | Output |',
+    '| --- | --- | --- | --- | --- | --: | --: | --: |',
+    '| Gemini 4 Argon[^gemini-4-argon-promo] | GA | Powerful | Default | Not applicable | $2.00 | $0.10 | $10.00 |',
+    '| Gemini 4 Carbon[^gemini-4-carbon-promo] | GA | Powerful | Default | Not applicable | $2.00 | $0.10 | $10.00 |',
+    '',
+    '1 AI credit = $0.01 USD',
+    '',
+    '[^gemini-4-argon-promo]: Gemini 4 Argon has a promotional price until December 1, 2026.',
+    '',
+    '[^gemini-4-carbon-promo]: Gemini 4 Carbon has a promotional price until December 1, 2026. Starting December 1, 2026, pricing is $4.00 per 1M input tokens, $0.20 per 1M cached input tokens, and $20.00 per 1M output tokens.',
+    '',
+  ].join('\n');
+}
+
+const parseCopilot = (text) =>
+  copilotParser.parse(
+    {
+      'github-copilot-pricing': handWritten(text),
+      'github-copilot-legacy-multipliers': handWritten(
+        '| Model | Multiplier |\n| --- | --- |\n| Gemini 4 Argon | 1 |\n',
+      ),
+      'github-copilot-legacy-requests': handWritten('Purchase additional premium requests at $0.04/request.'),
+    },
+    factoryFor(copilotParser.META),
+  ).rows;
 
 const ROUTE_TO_FLASH = [
   '  Gemini 2.5 Pro (`gemini-2.5-pro`) is',
@@ -467,10 +612,239 @@ describe('parsers on hand-written pages', () => {
     assert.equal(handRow(rows, 'cursor:grok-4.7:global:standard:all:input_uncached'), undefined);
     assert.equal(handRow(rows, 'cursor:composer-mini:global:standard:all:input_uncached').ListUnitPrice, '0.05');
   });
+  const datedCursorPage = cursorPage.replace(
+    '| [Claude Opus 5.5]',
+    [
+      '| [Gemini 4 Carbon](https://google.com) | Google | $2 | - | $0.1 | $10 | No | Introductory pricing through November 30, 2026. From December 1, 2026: $4 input, $0.20 cache read, $20 output per 1M tokens |',
+      '| [GPT-5.6 Sol](https://openai.com) | OpenAI | $4 | $5 | $0.4 | $20 | Yes | Reasoning model; Promotional pricing through November 21, 2026 |',
+      '| [Claude Opus 5.5]',
+    ].join('\n'),
+  );
+
+  test('reads the Specialized models table by its Category column', () => {
+    const specialized = [
+      '| <a id="cyber-models"></a>Cyber — Trusted Access: [Daybreak](https://example.com/) | gpt-6-cyber (short context) | $20.00 | $100.00 | $2.00 | $25.00 | $50.00 |',
+      '| Cyber — Trusted Access: [Daybreak](https://example.com/) | gpt-6-cyber (long context) | $40.00 | $150.00 | $4.00 | - | - |',
+      '| Codex | gpt-5.3-codex | $1.75 | $14.00 | $0.175 | - | - |',
+    ];
+    const rows = parseOpenai(openaiPage({ specialized }));
+    const short = handRow(rows, 'openai:gpt-6-cyber:global:standard:to-272000:input_uncached');
+    assert.equal(short.ListUnitPrice, '20.00');
+    assert.equal(short.ModelStatus, 'limited');
+    assert.equal(handRow(rows, 'openai:gpt-6-cyber:global:standard:over-272000:output').ListUnitPrice, '150.00');
+    assert.equal(handRow(rows, 'openai:gpt-6-cyber:global:standard:to-272000:cache_write_12h').ListUnitPrice, '50.00');
+    assert.equal(handRow(rows, 'openai:gpt-6-cyber:global:standard:over-272000:cache_write_30m'), undefined);
+    assert.equal(handRow(rows, 'openai:gpt-5.3-codex:global:standard:all:cache_read').ModelStatus, 'unstated');
+    assert.equal(handRow(rows, 'openai:gpt-6-astra-law:global:standard:all:output').ListUnitPrice, '50.00');
+    assert.ok(!rows.some(({ ModelId }) => ['text-embedding-3-small', 'omni-moderation-latest'].includes(ModelId)));
+    const unknown = ['| Agents | gpt-agent | $1.00 | $2.00 | - | - | - |'];
+    assert.throws(() => parseOpenai(openaiPage({ specialized: unknown })), /unknown category "Agents"/);
+    const range = ['| Codex | gpt-5.3-codex (medium context) | $1.75 | $14.00 | - | - | - |'];
+    assert.throws(
+      () => parseOpenai(openaiPage({ specialized: range })),
+      /model gpt-5\.3-codex \(medium context\) not found/,
+    );
+  });
+
+  test('reads the Images, GPT-Live and Realtime & Audio sections without pricing their tables', () => {
+    const section = (heading, row) => [
+      heading,
+      '',
+      '### Grouped Pricing Table data',
+      '',
+      row,
+      '| --- | --- |',
+      '| gpt-x | $1.00 |',
+      '',
+    ];
+    const beforeTools = [
+      ...section('Images', '| Model | Input |'),
+      ...section('GPT-Live', '| Model | Price per minute |'),
+      ...section('Realtime & Audio', '| Model | Input |'),
+    ];
+    const rows = parseOpenai(openaiPage({ beforeTools }));
+    assert.ok(!rows.some(({ ModelId }) => ModelId === 'gpt-x'));
+    const renamed = beforeTools.map((line) => (line === 'GPT-Live' ? 'GPT-Live sessions' : line));
+    assert.throws(() => parseOpenai(openaiPage({ beforeTools: renamed })), /unknown heading "GPT-Live sessions"/);
+  });
+
+  test('reads the renamed web search tool rows', () => {
+    const rows = parseOpenai(openaiPage());
+    assert.equal(handRow(rows, 'openai:fee:web-search').ListUnitPrice, '10.00');
+    assert.equal(handRow(rows, 'openai:fee:web-search-preview-non-reasoning').ListUnitPrice, '25.00');
+    const older = [
+      '| Web search | Web search (all models) | $10.00 / 1k calls + Search content tokens billed at model rates. |',
+      '| Web search | Web search preview (non-reasoning models) | $25.00 / 1k calls + Search content tokens are free. |',
+    ];
+    assert.throws(() => parseOpenai(openaiPage({ webSearch: older })), /Web search \(incl\. images\) not found/);
+  });
+
+  test('reads the cache hit multipliers from the per-model table', () => {
+    const rows = parseAnthropic(anthropicPage());
+    const fable = handRow(rows, 'anthropic:multiplier:prompt-cache-read-claude-fable-5-2');
+    assert.equal(fable.Multiplier, '0.025');
+    assert.deepEqual(fable.AppliesToModels, ['claude-fable-5-2', 'claude-mythos-5-2']);
+    assert.deepEqual(handRow(rows, 'anthropic:multiplier:prompt-cache-read-claude-opus-5-5').AppliesToModels, [
+      'claude-opus-5-5',
+    ]);
+    assert.equal(handRow(rows, 'anthropic:multiplier:prompt-cache-read-claude-sonnet-5-5').Multiplier, '0.05');
+    assert.equal(handRow(rows, 'anthropic:multiplier:prompt-cache-read').Multiplier, '0.1');
+    const listed = parseAnthropic(
+      anthropicPage({
+        cacheHits: ['| Claude Opus 5.5, Claude Sonnet 5.5, and Claude Fable 5.2 | 0.05x | $0.20 USD |'],
+      }),
+    );
+    assert.deepEqual(handRow(listed, 'anthropic:multiplier:prompt-cache-read-claude-opus-5-5').AppliesToModels, [
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-fable-5-2',
+    ]);
+    const others = anthropicPage().replace('| All other models | 0.1x |', '| All other models | 0.2x |');
+    assert.throws(() => parseAnthropic(others), /gives other models 0\.2x, the cache read row 0\.1x/);
+    const cellOnly = anthropicPage({ cacheHits: null });
+    assert.throws(() => parseAnthropic(cellOnly), /no table with column "Cache hit multiplier"/);
+  });
+
+  test('a model whose own cache hit multiplier left the page stops the build', () => {
+    const factory = factoryFor(anthropicParser.META);
+    const previous = {
+      CatalogVersion: '0.3.0',
+      rows: [
+        factory.multiplier(handWritten(''), {
+          key: 'prompt-cache-read-claude-sonnet-5-5',
+          ModifierKind: 'prompt_cache',
+          Multiplier: '0.05',
+          AppliesToModels: ['claude-sonnet-5-5'],
+          AppliesToTokenClasses: ['cache_read'],
+        }),
+      ],
+    };
+    const withoutSonnet = ['| Claude Fable 5.2 and Claude Mythos 5.2 | 0.025x | $0.20 USD |'];
+    assert.throws(
+      () => parseAnthropic(anthropicPage({ cacheHits: withoutSonnet }), previous),
+      /claude-sonnet-5-5 had its own cache read multiplier in 0\.3\.0 and the page names none/,
+    );
+    assert.ok(parseAnthropic(anthropicPage(), previous).length > 0);
+    const gone = anthropicPage({ cacheHits: withoutSonnet }).replace(/^\| Claude Sonnet 5\.5 .*\n/gm, '');
+    assert.equal(
+      handRow(parseAnthropic(gone, previous), 'anthropic:multiplier:prompt-cache-read-claude-sonnet-5-5'),
+      undefined,
+    );
+  });
+
+  test('a model of limited availability is limited on its fast mode rows too', () => {
+    const rows = parseAnthropic(anthropicPage());
+    assert.equal(handRow(rows, 'anthropic:claude-mythos-5-2:global:fast:all:output').ModelStatus, 'limited');
+    assert.equal(handRow(rows, 'anthropic:claude-mythos-5-2:global:standard:all:output').ModelStatus, 'limited');
+    assert.equal(handRow(rows, 'anthropic:claude-fable-5-2:global:fast:all:output').ModelStatus, 'active');
+  });
+
+  test('reads the first sentence of a footnote that continues after its date', () => {
+    const rows = parseCopilot(copilotPage());
+    const promotion = handRow(rows, 'github-copilot:gemini-4-carbon:global:standard:all:output');
+    assert.equal(promotion.ListUnitPrice, '10.00');
+    assert.equal(promotion.EffectiveEnd, '2026-12-01');
+    assert.equal(promotion.Note, 'Promotional price. The page states the price that follows it.');
+    const next = handRow(rows, 'github-copilot:gemini-4-carbon:global:standard:all:output:from-2026-12-01');
+    assert.equal(next.ListUnitPrice, '20.00');
+    assert.equal(next.EffectiveStart, '2026-12-01');
+    assert.equal(next.EffectiveEnd, null);
+    assert.equal(
+      handRow(rows, 'github-copilot:gemini-4-carbon:global:standard:all:cache_read:from-2026-12-01').ListUnitPrice,
+      '0.20',
+    );
+    const argon = handRow(rows, 'github-copilot:gemini-4-argon:global:standard:all:input_uncached');
+    assert.equal(argon.EffectiveEnd, '2026-12-01');
+    assert.equal(argon.Note, 'Promotional price. The page states no price after it ends.');
+    assert.equal(
+      handRow(rows, 'github-copilot:gemini-4-argon:global:standard:all:input_uncached:from-2026-12-01'),
+      undefined,
+    );
+    const reworded = copilotPage().replace('Starting December 1, 2026, pricing is', 'Later, pricing rises to');
+    assert.throws(() => parseCopilot(reworded), /unread sentence after the date in footnote gemini-4-carbon-promo/);
+    const gap = copilotPage().replace('Starting December 1, 2026', 'Starting December 2, 2026');
+    assert.throws(() => parseCopilot(gap), /ends its promotion on 2026-12-01 and states a price from 2026-12-02/);
+  });
+
+  test('reads a dated price and the price after it from a Cursor note', () => {
+    const rows = parseCursor(datedCursorPage);
+    const sol = handRow(rows, 'cursor:gpt-5.6-sol:global:standard:all:output');
+    assert.equal(sol.EffectiveEnd, '2026-11-22');
+    assert.equal(sol.Note, 'Promotional price. The page states no price after it ends.');
+    assert.equal(handRow(rows, 'cursor:gemini-4-carbon:global:standard:all:input_uncached').EffectiveEnd, '2026-12-01');
+    assert.equal(
+      handRow(rows, 'cursor:gemini-4-carbon:global:standard:all:input_uncached:from-2026-12-01').ListUnitPrice,
+      '4',
+    );
+    assert.equal(
+      handRow(rows, 'cursor:gemini-4-carbon:global:standard:all:cache_read:from-2026-12-01').ListUnitPrice,
+      '0.20',
+    );
+    assert.equal(
+      handRow(rows, 'cursor:gemini-4-carbon:global:standard:all:output:from-2026-12-01').ListUnitPrice,
+      '20',
+    );
+    assert.equal(handRow(rows, 'cursor:claude-opus-5.5:global:standard:all:output').EffectiveEnd, null);
+    const reworded = datedCursorPage.replace(
+      'Promotional pricing through November 21, 2026',
+      'Promotional pricing ends November 21, 2026',
+    );
+    assert.throws(() => parseCursor(reworded), /unread date in the note/);
+  });
+
+  test('a price that ends with no later price is named with the day the fallback takes over', () => {
+    const openai = { Provider: 'openai', rows: parseOpenai(openaiPage()) };
+    const copilot = { Provider: 'github-copilot', rows: parseCopilot(copilotPage()) };
+    assert.deepEqual(pricesEndingUnfollowed([openai, copilot]), [
+      { provider: 'openai', model: 'gpt-5.6-sol', from: '2026-12-01' },
+      { provider: 'openai', model: 'gpt-6-astra-law', from: '2027-01-01' },
+      { provider: 'github-copilot', model: 'gemini-4-argon', from: '2026-12-01' },
+    ]);
+    const google = { Provider: 'google', rows: parseGoogle(reroutePage()) };
+    assert.deepEqual(pricesEndingUnfollowed([google]), []);
+  });
+
+  test('a page no parser reads leaves the other sheets to build', () => {
+    const pages = {
+      'openai-pricing': handWritten(openaiPage()),
+      'openai-reasoning': handWritten('Reasoning tokens are billed as [output tokens](/docs/pricing).'),
+      'cursor-pricing': handWritten(cursorPage),
+    };
+    const { sheets: built, failures } = buildEachSheet(pages, { previous: [], sheetDate: SHEET_DATE });
+    assert.deepEqual(
+      built.map(({ Provider }) => Provider),
+      ['openai', 'cursor'],
+    );
+    assert.deepEqual(
+      failures.map(({ provider }) => provider),
+      ['anthropic', 'google', 'github-copilot'],
+    );
+    assert.ok(failures.every(({ message }) => message.length > 0));
+    assert.throws(() => buildSheets(pages, { previous: [], sheetDate: SHEET_DATE }));
+  });
 });
 
 describe('the price rules of a release', () => {
   const newest = readRelease(CATALOG_VERSION);
+  const tokenRows = (sheet) =>
+    sheet.rows.filter((row) => row.RowType === 'unit_price' && row.PricingUnit === '1000000 Tokens');
+
+  // Computed from the rows each time, so a new model, tier or context range can never leave it behind.
+  function fallbackShortfalls(sheet) {
+    const fallbacks = sheet.rows.filter(({ RowType }) => RowType === 'fallback');
+    const classes = new Set(tokenRows(sheet).map(({ TokenClass }) => TokenClass));
+    const missing = [...classes]
+      .filter((tokenClass) => !fallbacks.some(({ TokenClass }) => TokenClass === tokenClass))
+      .map((tokenClass) => `no fallback for ${tokenClass}`);
+    const wrong = fallbacks.flatMap(({ SkuPriceId, TokenClass, ListUnitPrice }) => {
+      const prices = tokenRows(sheet).filter((row) => row.TokenClass === TokenClass);
+      const highest = maxDecimal(prices.map((row) => row.ListUnitPrice));
+      return compareDecimals(ListUnitPrice, highest) === 0
+        ? []
+        : [`${SkuPriceId} is ${ListUnitPrice}, the highest ${TokenClass} price is ${highest}`];
+    });
+    return [...missing, ...wrong];
+  }
   const raised = (provider, change) => {
     const copy = structuredClone(newest.find(({ Provider }) => Provider === provider));
     change(copy.rows);
@@ -493,6 +867,19 @@ describe('the price rules of a release', () => {
       fallbackProblems(first).includes(
         'openai:gpt-5.5-pro:global:standard:over-272000:output: 270.00 is above the output fallback 180.00',
       ),
+    );
+  });
+
+  test('every fallback equals the highest unit price of its token class in its sheet', () => {
+    const ruled = releases().filter((release) => compareVersions(release, FIRST_RULED_RELEASE) >= 0);
+    const candidates = [...ruled.flatMap(readRelease), ...sheets];
+    assert.ok(candidates.length >= ruled.length * 5);
+    for (const candidate of candidates) {
+      assert.deepEqual(fallbackShortfalls(candidate), [], `${candidate.CatalogVersion} ${candidate.Provider}`);
+    }
+    const first = readRelease('0.1.0').find(({ Provider }) => Provider === 'openai');
+    assert.ok(
+      fallbackShortfalls(first).includes('openai:fallback:output is 180.00, the highest output price is 600.00'),
     );
   });
 
@@ -631,7 +1018,13 @@ describe('Anthropic sheet, read against the page by hand', needsPages, () => {
         .rows.filter((row) => row.ServiceTier === 'fast')
         .map((row) => row.ModelId),
     );
-    assert.deepEqual([...fastModels].sort(), ['claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5']);
+    assert.deepEqual([...fastModels].sort(), [
+      'claude-fable-5-2',
+      'claude-mythos-5-2',
+      'claude-opus-4-8',
+      'claude-opus-5',
+      'claude-opus-5-5',
+    ]);
     assert.equal(rowById('anthropic:claude-opus-5-5:global:batch:all:cache_read'), undefined);
   });
 
@@ -670,10 +1063,32 @@ describe('Anthropic sheet, read against the page by hand', needsPages, () => {
   test('carries the model-specific cache read multipliers', () => {
     assert.equal(rowById('anthropic:multiplier:prompt-cache-read').Multiplier, '0.1');
     assert.equal(rowById('anthropic:multiplier:prompt-cache-read-claude-fable-5-1').Multiplier, '0.025');
+    assert.deepEqual(rowById('anthropic:multiplier:prompt-cache-read-claude-fable-5-2').AppliesToModels, [
+      'claude-fable-5-2',
+      'claude-mythos-5-2',
+    ]);
     assert.deepEqual(rowById('anthropic:multiplier:prompt-cache-read-claude-opus-5-5').AppliesToModels, [
       'claude-opus-5-5',
-      'claude-sonnet-5-5',
     ]);
+    assert.equal(rowById('anthropic:multiplier:prompt-cache-read-claude-sonnet-5-5').Multiplier, '0.05');
+  });
+
+  test('carries Claude Fable 5.2 and Claude Mythos 5.2 at every tier the page prints', () => {
+    for (const model of ['claude-fable-5-2', 'claude-mythos-5-2']) {
+      assert.deepEqual(
+        ['input_uncached', 'cache_write_5m', 'cache_write_1h', 'cache_read', 'output'].map((tokenClass) =>
+          price('anthropic', model, tokenClass),
+        ),
+        ['8', '10', '16', '0.20', '40'],
+      );
+      assert.equal(price('anthropic', model, 'input_uncached', { ServiceTier: 'batch' }), '4');
+      assert.equal(price('anthropic', model, 'output', { ServiceTier: 'batch' }), '20');
+      assert.equal(price('anthropic', model, 'input_uncached', { ServiceTier: 'fast' }), '16');
+      assert.equal(price('anthropic', model, 'output', { ServiceTier: 'fast' }), '80');
+    }
+    assert.equal(priceOf('anthropic', 'claude-mythos-5-2', 'output', { ServiceTier: 'fast' }).ModelStatus, 'limited');
+    assert.equal(rowById('anthropic:fallback:input_uncached').ListUnitPrice, '16');
+    assert.equal(rowById('anthropic:fallback:output').ListUnitPrice, '80');
   });
 
   test('leaves a blank tool overhead cell without a row', () => {
@@ -706,14 +1121,19 @@ describe('OpenAI sheet, read against the page by hand', needsPages, () => {
     assert.equal(price('openai', 'gpt-5.3-codex', 'output', { ServiceTier: 'fast' }), '28.00');
   });
 
-  test('carries gpt-6-cyber from the Cyber models section', () => {
+  test('carries gpt-6-cyber at both context lengths from the Specialized models table', () => {
     assert.deepEqual(
       ['input_uncached', 'output', 'cache_read', 'cache_write_30m', 'cache_write_12h'].map((tokenClass) =>
         price('openai', 'gpt-6-cyber', tokenClass, short),
       ),
       ['20.00', '100.00', '2.00', '25.00', '50.00'],
     );
-    assert.equal(rowById('openai:gpt-6-cyber:global:standard:over-272000:input_uncached'), undefined);
+    assert.deepEqual(
+      ['input_uncached', 'output', 'cache_read'].map((tokenClass) => price('openai', 'gpt-6-cyber', tokenClass, long)),
+      ['40.00', '150.00', '4.00'],
+    );
+    assert.equal(rowById('openai:gpt-6-cyber:global:standard:over-272000:cache_write_30m'), undefined);
+    assert.equal(price('openai', 'gpt-5.5-cyber-preview', 'output', short), '75.00');
   });
 
   test('keeps the page digit where it rounds', () => {
@@ -784,6 +1204,35 @@ describe('Google sheet, read against the page by hand', needsPages, () => {
     assert.equal(later.EffectiveEnd, null);
   });
 
+  test('carries Gemini 4 Carbon at both dated prices in every tier', () => {
+    const published = {
+      standard: [
+        ['2.00', '10.00', '0.10'],
+        ['4.00', '20.00', '0.20'],
+      ],
+      batch: [
+        ['1.00', '5.00', '0.05'],
+        ['2.00', '10.00', '0.10'],
+      ],
+      flex: [
+        ['1.00', '5.00', '0.05'],
+        ['2.00', '10.00', '0.10'],
+      ],
+      priority: [
+        ['3.60', '18.00', '0.18'],
+        ['7.20', '36.00', '0.36'],
+      ],
+    };
+    for (const [ServiceTier, [now, later]] of Object.entries(published)) {
+      const read = (scope) =>
+        ['input_uncached', 'output', 'cache_read'].map((tokenClass) =>
+          price('google', 'gemini-4-carbon', tokenClass, { ServiceTier, ...scope }),
+        );
+      assert.deepEqual(read({ EffectiveEnd: '2026-12-01' }), now, ServiceTier);
+      assert.deepEqual(read({ EffectiveStart: '2026-12-01', EffectiveEnd: null }), later, ServiceTier);
+    }
+  });
+
   test('carries a dual-id model under both ids', () => {
     assert.equal(
       price('google', 'gemini-3.1-pro-preview', 'input_uncached', { ContextTierMaxInputTokens: 200000 }),
@@ -835,6 +1284,22 @@ describe('Copilot sheet, read against the page by hand', needsPages, () => {
     assert.equal(priceOf('github-copilot', 'gemini-4-argon', 'output').EffectiveEnd, '2026-12-01');
   });
 
+  test('carries Gemini 4 Carbon from December 1, 2026 at the price its footnote states', () => {
+    const later = { EffectiveStart: '2026-12-01' };
+    assert.deepEqual(
+      ['input_uncached', 'cache_read', 'output'].map((tokenClass) =>
+        price('github-copilot', 'gemini-4-carbon', tokenClass, later),
+      ),
+      ['4.00', '0.20', '20.00'],
+    );
+    assert.equal(
+      priceOf('github-copilot', 'gemini-4-carbon', 'output', { EffectiveEnd: '2026-12-01' }).ListUnitPrice,
+      '10.00',
+    );
+    assert.equal(rowById('github-copilot:gemini-4-argon:global:standard:all:output:from-2026-12-01'), undefined);
+    assert.equal(price('github-copilot', 'claude-fable-5.2', 'output'), '40.00');
+  });
+
   test('reads fast mode out of the model name', () => {
     assert.equal(price('github-copilot', 'claude-opus-4.8', 'input_uncached', { ServiceTier: 'fast' }), '10.00');
     assert.equal(price('github-copilot', 'claude-opus-4.8', 'input_uncached'), '5.00');
@@ -870,6 +1335,22 @@ describe('Cursor sheet, read against the page by hand', needsPages, () => {
     assert.ok(row.ExcludedModels.includes('deepseek-v4.1-flash-1017'));
     assert.ok(!row.ExcludedModels.includes('claude-opus-5.5'));
     assert.ok(!row.ExcludedModels.some((id) => id.startsWith('grok') || id.startsWith('composer')));
+  });
+
+  test('ends GPT-5.6 Sol after its promotion and prices Gemini 4 Carbon from December 1, 2026', () => {
+    assert.equal(priceOf('cursor', 'gpt-5.6-sol', 'output').EffectiveEnd, '2026-11-22');
+    assert.equal(rowById('cursor:gpt-5.6-sol:global:standard:all:output:from-2026-11-22'), undefined);
+    const later = { EffectiveStart: '2026-12-01' };
+    assert.deepEqual(
+      ['input_uncached', 'cache_read', 'output'].map((tokenClass) =>
+        price('cursor', 'gemini-4-carbon', tokenClass, later),
+      ),
+      ['4', '0.20', '20'],
+    );
+    assert.equal(
+      priceOf('cursor', 'gemini-4-carbon', 'input_uncached', { EffectiveEnd: '2026-12-01' }).ListUnitPrice,
+      '2',
+    );
   });
 
   test('the residency multiplier names only models marked Yes', () => {
@@ -920,7 +1401,7 @@ describe('every sheet', needsPages, () => {
         assert.equal(top.SourceSha256, fallback.SourceSha256, fallback.SkuPriceId);
       }
     }
-    assert.equal(rowById('anthropic:fallback:output').ListUnitPrice, '75');
+    assert.equal(rowById('anthropic:fallback:output').ListUnitPrice, '80');
     assert.equal(rowById('openai:fallback:output').ListUnitPrice, '600.00');
     assert.equal(rowById('openai:fallback:cache_read').ListUnitPrice, '12.00');
     assert.equal(rowById('google:fallback:input_uncached').ListUnitPrice, '7.20');
@@ -942,7 +1423,7 @@ describe('the scrape job', needsPages, () => {
   });
 
   test('a new page row shows as added and a dropped one as removed', () => {
-    const moved = changed('openai-pricing', /\| gpt-6-cyber \|[^\n]*\n/, '');
+    const moved = changed('openai-pricing', /^\|[^\n]*\| gpt-6-cyber \((?:short|long) context\) \|[^\n]*\n/gm, '');
     const id = 'openai:gpt-6-cyber:global:standard:to-272000:output';
     const { removed } = diffSheets(sheets, buildSheets(moved, { previous: [] }).sheets);
     assert.ok(removed.some(({ row }) => row.SkuPriceId === id));
@@ -969,32 +1450,79 @@ describe('the scrape job', needsPages, () => {
     assert.deepEqual(Object.keys(pages).sort(), PAGES.map(({ id }) => id).sort());
   });
 
-  test('the watch fails with the row diff when a price moves', () => {
+  // A copy of the saved pages in a temporary directory, as the watch fetches them, with edits of its own.
+  function watchCopy() {
     const directory = mkdtempSync(join(tmpdir(), 'catalog-watch-'));
+    let sources = loadSources();
+    cpSync(join(TESTDATA, 'pages'), join(directory, 'pages'), { recursive: true });
+    writeFileSync(join(directory, 'SOURCES.json'), JSON.stringify(sources));
+    return {
+      edit(id, from, to) {
+        const source = sources.find((candidate) => candidate.id === id);
+        const path = join(directory, source.file);
+        const before = readFileSync(path, 'utf8');
+        const text = before.replace(from, to);
+        assert.notEqual(text, before, `${id}: ${from} is not on the page`);
+        writeFileSync(path, text);
+        const sha256 = createHash('sha256').update(text).digest('hex');
+        sources = sources.map((candidate) => (candidate === source ? { ...source, sha256 } : candidate));
+        writeFileSync(join(directory, 'SOURCES.json'), JSON.stringify(sources));
+      },
+      watch: () => spawnSync(process.execPath, [BUILD, '--diff', '--pages', directory], { encoding: 'utf8' }),
+      remove: () => rmSync(directory, { recursive: true, force: true }),
+    };
+  }
+
+  test('the watch fails with the row diff when a price moves', () => {
+    const copy = watchCopy();
     try {
-      const sources = loadSources();
-      cpSync(join(TESTDATA, 'pages'), join(directory, 'pages'), { recursive: true });
-      writeFileSync(join(directory, 'SOURCES.json'), JSON.stringify(sources));
-      const clean = spawnSync(process.execPath, [BUILD, '--diff', '--pages', directory], { encoding: 'utf8' });
+      const clean = copy.watch();
       assert.equal(clean.status, 0, clean.stderr);
       assert.match(clean.stdout, new RegExp(`build to the rows of ${CATALOG_VERSION.replaceAll('.', '\\.')}`));
 
-      const path = join(directory, 'pages', 'openai-pricing.md');
-      const text = readFileSync(path, 'utf8').replace('| gpt-6-cyber | $20.00 |', '| gpt-6-cyber | $21.00 |');
-      writeFileSync(path, text);
-      const digest = createHash('sha256').update(text).digest('hex');
-      const moved = sources.map((source) =>
-        source.id === 'openai-pricing' ? { ...source, sha256: digest, retrievedAt: '2026-11-08T06:00:00Z' } : source,
+      copy.edit(
+        'openai-pricing',
+        '| gpt-6-cyber (short context) | $20.00 |',
+        '| gpt-6-cyber (short context) | $21.00 |',
       );
-      writeFileSync(join(directory, 'SOURCES.json'), JSON.stringify(moved));
-      const watch = spawnSync(process.execPath, [BUILD, '--diff', '--pages', directory], { encoding: 'utf8' });
+      const watch = copy.watch();
       assert.equal(watch.status, 1);
+      assert.equal(watch.stdout.split('\n')[0], 'prices changed');
       assert.match(
         watch.stdout,
         /`openai:gpt-6-cyber:global:standard:to-272000:input_uncached` \| ListUnitPrice \| "20\.00" \| "21\.00"/,
       );
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      copy.remove();
+    }
+  });
+
+  test('the watch names the parser that cannot read its page and still diffs the others', () => {
+    const copy = watchCopy();
+    try {
+      copy.edit('openai-pricing', '\nTools\n', '\nBuilt-in tools\n');
+      const shape = copy.watch();
+      assert.equal(shape.status, 1);
+      const [first, second] = shape.stdout.split('\n');
+      assert.equal(first, 'page shape changed');
+      assert.match(second, /^The openai parser cannot read its page: openai: unknown heading "Built-in tools"/);
+      assert.match(
+        shape.stdout,
+        /The sheets that built \(anthropic, google, github-copilot, cursor\) build to the rows of/,
+      );
+      assert.doesNotMatch(shape.stdout, /`openai:/);
+
+      copy.edit('anthropic-pricing', /(\| Claude Opus 5\.5 +\| )\$4 \/ MTok/, '$1$5 / MTok');
+      const both = copy.watch();
+      assert.equal(both.status, 1);
+      assert.equal(both.stdout.split('\n')[0], 'page shape changed and prices changed');
+      assert.match(
+        both.stdout,
+        /`anthropic:claude-opus-5-5:global:standard:all:input_uncached` \| ListUnitPrice \| "4" \| "5"/,
+      );
+      assert.doesNotMatch(both.stdout, /`openai:/);
+    } finally {
+      copy.remove();
     }
   });
 });

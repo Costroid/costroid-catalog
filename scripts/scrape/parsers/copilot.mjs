@@ -15,22 +15,42 @@ function thresholdOf(cell) {
   throw new Error(`copilot: unreadable threshold ${JSON.stringify(cell)}`);
 }
 
-function promotionEnds(page) {
-  const ends = new Map();
-  for (const [, id, sentence] of page.matchAll(/^\[\^([\w-]+)\]: (.*)$/gm)) {
-    const through = /through ([A-Z][a-z]+ \d+, \d{4})\.$/.exec(sentence);
-    const until = /until ([A-Z][a-z]+ \d+, \d{4})\.$/.exec(sentence);
-    if (through) ends.set(id, dayAfter(isoDate(through[1])));
-    else if (until) ends.set(id, isoDate(until[1]));
-    else throw new Error(`copilot: unread footnote ${id}`);
-  }
-  return ends;
+const DATE = '([A-Z][a-z]+ \\d+, \\d{4})';
+const PROMOTION_END = new RegExp(`(through|until) ${DATE}\\.$`);
+const NEXT_PRICE = new RegExp(
+  `^Starting ${DATE}, pricing is \\$([\\d.]+) per 1M input tokens, \\$([\\d.]+) per 1M cached input tokens, and \\$([\\d.]+) per 1M output tokens\\.$`,
+);
+
+// A footnote's first sentence ends the promotion on a date. A second sentence may state the price from a later date.
+function readFootnote(id, text) {
+  const [first, ...rest] = text.split(/(?<=\.) (?=[A-Z])/);
+  const ending = PROMOTION_END.exec(first);
+  if (!ending) throw new Error(`copilot: unread footnote ${id}`);
+  const end = ending[1] === 'through' ? dayAfter(isoDate(ending[2])) : isoDate(ending[2]);
+  if (rest.length === 0) return { end, next: null };
+  const next = NEXT_PRICE.exec(rest.join(' '));
+  if (!next) throw new Error(`copilot: unread sentence after the date in footnote ${id}`);
+  const start = isoDate(next[1]);
+  if (start !== end)
+    throw new Error(`copilot: footnote ${id} ends its promotion on ${end} and states a price from ${start}`);
+  return { end, next: { start, prices: { input_uncached: next[2], cache_read: next[3], output: next[4] } } };
 }
+
+function promotions(page) {
+  const found = new Map();
+  for (const [, id, text] of page.matchAll(/^\[\^([\w-]+)\]: (.*)$/gm)) found.set(id, readFootnote(id, text));
+  return found;
+}
+
+export const PROMOTION_NOTE = {
+  ending: 'Promotional price. The page states no price after it ends.',
+  followed: 'Promotional price. The page states the price that follows it.',
+};
 
 export function parse(pages, factory) {
   const pricing = pages['github-copilot-pricing'];
   const page = pricing.text;
-  const ends = promotionEnds(page);
+  const footnotes = promotions(page);
   const rows = [];
   const promoted = [];
 
@@ -43,8 +63,8 @@ export function parse(pages, factory) {
         const clean = stripMarkup(row.Model);
         const fast = clean.includes('(fast mode)');
         const ModelName = clean.replace(/ \(.*$/, '');
-        const end = footnote ? ends.get(footnote) : undefined;
-        if (end) promoted.push(ModelName);
+        const promotion = footnote ? footnotes.get(footnote) : undefined;
+        if (promotion && !promotion.next) promoted.push(ModelName);
         const identity = {
           ModelId: slug(ModelName),
           ModelName,
@@ -53,8 +73,10 @@ export function parse(pages, factory) {
           ModelStatus: row['Release status'] === 'GA' ? 'active' : 'preview',
           ServiceTier: fast ? 'fast' : 'standard',
           ...thresholdOf(row['Threshold (input tokens)']),
-          ...(end ? { EffectiveEnd: end, Note: 'Promotional price. The page states no price after it ends.' } : {}),
         };
+        const ending = promotion
+          ? { EffectiveEnd: promotion.end, Note: PROMOTION_NOTE[promotion.next ? 'followed' : 'ending'] }
+          : {};
         const prices = {
           input_uncached: moneyOf(row.Input),
           cache_read: moneyOf(row['Cached input']),
@@ -62,7 +84,12 @@ export function parse(pages, factory) {
           output: moneyOf(row.Output),
         };
         for (const [TokenClass, ListUnitPrice] of Object.entries(prices)) {
-          if (ListUnitPrice !== null) rows.push(factory.price(pricing, { ...identity, TokenClass, ListUnitPrice }));
+          if (ListUnitPrice !== null)
+            rows.push(factory.price(pricing, { ...identity, ...ending, TokenClass, ListUnitPrice }));
+        }
+        const next = promotion?.next;
+        for (const [TokenClass, ListUnitPrice] of Object.entries(next?.prices ?? {})) {
+          rows.push(factory.price(pricing, { ...identity, EffectiveStart: next.start, TokenClass, ListUnitPrice }));
         }
       }
     }

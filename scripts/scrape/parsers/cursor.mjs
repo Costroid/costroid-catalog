@@ -1,6 +1,6 @@
 import { compareDecimals } from '../lib/decimal.mjs';
-import { moneyOf, parseTables, requireMatch, stripMarkup } from '../lib/markdown.mjs';
-import { slug } from './copilot.mjs';
+import { dayAfter, isoDate, moneyOf, parseTables, requireMatch, stripMarkup } from '../lib/markdown.mjs';
+import { PROMOTION_NOTE, slug } from './copilot.mjs';
 
 export const META = { sheet: 'cursor', serviceProviderName: 'Cursor' };
 
@@ -29,6 +29,41 @@ function readModel(cell, notes) {
   return { name, tier: { ...tier, ContextTierMinInputTokens: Number(from) * 1000 } };
 }
 
+const DATE = '([A-Z][a-z]+ \\d{1,2}, \\d{4})';
+const PROMOTION = new RegExp(`(?:Promotional|Introductory) pricing through ${DATE}`);
+const NEXT_PRICE = new RegExp(`From ${DATE}: ([^;]+?) per 1M tokens`);
+const NEXT_CLASSES = {
+  input: 'input_uncached',
+  'cache write': CACHE_WRITE,
+  'cache read': 'cache_read',
+  output: 'output',
+};
+
+// A note can end a row's price after a date and state the price from the next day. A date the note
+// gives in any other words stops the build.
+function datedPrice(notes) {
+  const promotion = PROMOTION.exec(notes);
+  const next = NEXT_PRICE.exec(notes);
+  const dates = notes.match(new RegExp(DATE, 'g')) ?? [];
+  if (dates.length !== [promotion, next].filter(Boolean).length || (next && !promotion))
+    throw new Error(`cursor: unread date in the note ${JSON.stringify(notes)}`);
+  if (!promotion) return null;
+  const end = dayAfter(isoDate(promotion[1]));
+  if (!next) return { end, next: null };
+  const start = isoDate(next[1]);
+  if (start !== end) throw new Error(`cursor: a note ends a price on ${end} and states the next from ${start}`);
+  const prices = {};
+  for (const part of next[2].split(', ')) {
+    const [, amount, name] = requireMatch(
+      part,
+      /^\$(\d+(?:\.\d+)?) (input|cache write|cache read|output)$/,
+      `price ${JSON.stringify(part)} in a note`,
+    );
+    prices[NEXT_CLASSES[name]] = amount;
+  }
+  return { end, next: { start, prices } };
+}
+
 // The page states the exemption as a rule, not a list: every cache-read price of the model below the threshold.
 function exemptModels(rows, below) {
   const cacheReads = new Map();
@@ -47,6 +82,7 @@ export function parse(pages, factory) {
   const tables = parseTables(page).filter(({ header }) => header.includes('US data residency'));
   if (tables.length !== 2) throw new Error(`cursor: expected two model tables, found ${tables.length}`);
   const usEligible = new Set();
+  const promoted = new Set();
   const entries = [];
 
   for (const table of tables) {
@@ -66,7 +102,9 @@ export function parse(pages, factory) {
         cache_read: moneyOf(row['Cache read']),
         output: moneyOf(row.Output),
       };
-      entries.push({ identity, prices });
+      const dated = datedPrice(row.Notes);
+      if (dated && !dated.next) promoted.add(name);
+      entries.push({ identity, prices, dated });
     }
   }
 
@@ -77,14 +115,21 @@ export function parse(pages, factory) {
       .filter(({ identity }) => identity.ContextTierMinInputTokens !== undefined)
       .map(({ identity }) => [tierKey(identity), identity.ContextTierMinInputTokens]),
   );
-  const rows = entries.flatMap(({ identity, prices }) => {
+  const rows = entries.flatMap(({ identity, prices, dated }) => {
     const bounded =
       identity.ContextTierMinInputTokens === undefined && longFrom.has(tierKey(identity))
         ? { ...identity, ContextTierMaxInputTokens: longFrom.get(tierKey(identity)) }
         : identity;
-    return Object.entries(prices)
+    const ending = dated ? { EffectiveEnd: dated.end, Note: PROMOTION_NOTE[dated.next ? 'followed' : 'ending'] } : {};
+    const listed = Object.entries(prices)
       .filter(([, ListUnitPrice]) => ListUnitPrice !== null)
-      .map(([TokenClass, ListUnitPrice]) => factory.price(pricing, { ...bounded, TokenClass, ListUnitPrice }));
+      .map(([TokenClass, ListUnitPrice]) =>
+        factory.price(pricing, { ...bounded, ...ending, TokenClass, ListUnitPrice }),
+      );
+    const following = Object.entries(dated?.next?.prices ?? {}).map(([TokenClass, ListUnitPrice]) =>
+      factory.price(pricing, { ...bounded, EffectiveStart: dated.next.start, TokenClass, ListUnitPrice }),
+    );
+    return [...listed, ...following];
   });
 
   requireMatch(
@@ -131,6 +176,10 @@ export function parse(pages, factory) {
   return {
     rows,
     omissions: [
+      ...[...promoted].map((name) => ({
+        item: `${name} after its promotion`,
+        reason: 'The page states the promotional price and no later price.',
+      })),
       { item: 'Credit rate', reason: 'The page sells prepaid credit at model rates and states no unit conversion.' },
       {
         item: 'Weekly pool draw-down rates',

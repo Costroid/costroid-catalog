@@ -1,8 +1,9 @@
 name: watch
 
-# Reads the provider pages once a day and fails, with the row diff in the log, when they no longer
-# build to the newest release. The pages stay in the runner's temporary directory: this job commits,
-# uploads and opens nothing.
+# Reads the provider pages once a day and fails when they no longer build to the newest release. The
+# first line of the log says "page shape changed" when a parser cannot read its page, "prices changed"
+# when rows differ, or both. The row diff of every sheet that built follows. The pages stay in the
+# runner's temporary directory: this job commits, uploads and opens nothing.
 
 on:
   schedule:

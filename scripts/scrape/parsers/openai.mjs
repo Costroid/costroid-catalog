@@ -1,32 +1,24 @@
-import { dayAfter, isoDate, moneyOf, parseTables, requireMatch } from '../lib/markdown.mjs';
+import { dayAfter, isoDate, moneyOf, parseTables, requireMatch, stripMarkup } from '../lib/markdown.mjs';
 
 export const META = { sheet: 'openai', serviceProviderName: 'OpenAI' };
 
 const TIERS = { Standard: 'standard', Batch: 'batch', Flex: 'flex', Fast: 'fast', Ultrafast: 'ultrafast' };
 const SECTIONS = [
   'Flagship models',
-  'Cyber models',
-  'Life sciences models',
-  'Legal model configurations',
   'Multimodal models',
-  'GPT-Live sessions',
-  'Realtime and audio generation models',
-  'Image generation models',
-  'Transcription models',
-  'Tools',
+  'Images',
+  'GPT-Live',
+  'Realtime & Audio',
+  'Transcription',
   'Specialized models',
+  'Tools',
   'Fine-tuning',
   'Cloud platforms',
 ];
-const PRICED_SECTIONS = new Set([
-  'Flagship models',
-  'Cyber models',
-  'Life sciences models',
-  'Legal model configurations',
-  'Specialized models',
-]);
-const CHAT_CATEGORIES = new Set(['ChatGPT', 'Codex', 'Search']);
-const LIMITED_SECTIONS = new Set(['Life sciences models']);
+const PRICED_SECTIONS = new Set(['Flagship models', 'Specialized models']);
+// The first words of a Category cell. A category the parser does not know stops the build.
+const PRICED_CATEGORIES = new Set(['Cyber', 'Life Sciences', 'Legal', 'ChatGPT', 'Codex', 'Search']);
+const UNPRICED_CATEGORIES = new Set(['Embedding', 'Moderation']);
 const CONTEXT_CLASSES = [
   ['input', 'input_uncached'],
   ['output', 'output'],
@@ -108,7 +100,26 @@ function fedramp(page) {
   return { EffectiveStart: isoDate(`${name} ${day}`) };
 }
 
-const statusIn = (section) => (LIMITED_SECTIONS.has(section) ? 'limited' : 'unstated');
+// A Category cell reads "Cyber — Trusted Access: [Daybreak](…)", sometimes after an anchor. Trusted access is limited access.
+function categoryOf(cell) {
+  const text = stripMarkup(cell.replace(/<[^>]*>/g, ''));
+  const [name] = text.split(' — ');
+  if (UNPRICED_CATEGORIES.has(name)) return null;
+  if (!PRICED_CATEGORIES.has(name)) throw new Error(`openai: unknown category ${JSON.stringify(name)}`);
+  return { ModelStatus: text.includes('Trusted Access') ? 'limited' : 'unstated' };
+}
+
+// A row of a table without context columns can name its context range after the model id.
+function modelRange(cell, threshold) {
+  const [, ModelId, range] = requireMatch(cell, /^([\w.-]+)(?: \((short|long) context\))?$/, `model ${cell}`);
+  if (range === 'short') return { ModelId, ContextTierMaxInputTokens: threshold };
+  return range === 'long' ? { ModelId, ContextTierMinInputTokens: threshold } : { ModelId };
+}
+
+const COLUMN_CLASSES = CONTEXT_CLASSES.map(([column, TokenClass]) => [
+  column[0].toUpperCase() + column.slice(1),
+  TokenClass,
+]);
 
 export function parse(pages, factory) {
   const pricing = pages['openai-pricing'];
@@ -137,10 +148,11 @@ export function parse(pages, factory) {
     if (!PRICED_SECTIONS.has(section)) continue;
     const isContextTable = table.header.includes('Short context input');
     for (const row of table.rows) {
-      if (row.Category && !CHAT_CATEGORIES.has(row.Category)) continue;
-      const ModelId = (row.Model ?? row['Model configuration']).replace(/ \(.*$/, '');
-      const identity = { ModelId, ModelName: ModelId, ModelStatus: statusIn(section), ServiceTier: tier };
+      const category = row.Category === undefined ? { ModelStatus: 'unstated' } : categoryOf(row.Category);
+      if (category === null) continue;
       if (isContextTable) {
+        const ModelId = row.Model.replace(/ \(.*$/, '');
+        const identity = { ModelId, ModelName: ModelId, ...category, ServiceTier: tier };
         for (const [column, TokenClass] of CONTEXT_CLASSES) {
           const short = moneyOf(row[`Short context ${column}`]);
           if (short !== null)
@@ -150,12 +162,10 @@ export function parse(pages, factory) {
             add({ ...identity, ContextTierMinInputTokens: threshold, TokenClass, ListUnitPrice: long });
         }
       } else {
-        for (const [column, TokenClass] of [
-          ['Input', 'input_uncached'],
-          ['Output', 'output'],
-          ['Cached input', 'cache_read'],
-        ]) {
-          const price = moneyOf(row[column]);
+        const { ModelId, ...range } = modelRange(row.Model, threshold);
+        const identity = { ModelId, ModelName: ModelId, ...range, ...category, ServiceTier: tier };
+        for (const [column, TokenClass] of COLUMN_CLASSES) {
+          const price = row[column] === undefined ? null : moneyOf(row[column]);
           if (price !== null) add({ ...identity, TokenClass, ListUnitPrice: price });
         }
       }
@@ -199,14 +209,14 @@ export function parse(pages, factory) {
     factory.fee(pricing, {
       key: 'web-search',
       FeeName: 'web_search',
-      ListUnitPrice: toolPrice('Web search (all models)'),
+      ListUnitPrice: toolPrice('Web search (incl. images)'),
       PricingUnit: '1000 Requests',
       Condition: 'Plus search content tokens at model rates.',
     }),
     factory.fee(pricing, {
       key: 'web-search-preview-non-reasoning',
       FeeName: 'web_search_preview_non_reasoning',
-      ListUnitPrice: toolPrice('Web search preview (non-reasoning models)'),
+      ListUnitPrice: toolPrice('Web search preview (other models)'),
       PricingUnit: '1000 Requests',
       Condition: 'Search content tokens are free.',
     }),
