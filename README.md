@@ -39,6 +39,10 @@ node scripts/validate.mjs
 
 It checks every sheet against the schema and prints one line per sheet with its row count.
 
+## Fallback
+
+Each sheet's fallback row prices a model the sheet does not name, and is the highest price a lookup can reach for its token class: the highest unit price of the sheet, or, where a fast tier lists no price for a cache class, that tier's input price times the prompt cache multiplier for the class (a multiplier that names the model before one that names none), whichever is higher; a regional multiplier applies on top.
+
 ## Versions
 
 A release is a directory under `sheets/`. A published release never changes in place. A customer pins a version.

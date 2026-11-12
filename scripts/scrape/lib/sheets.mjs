@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compareDecimals } from './decimal.mjs';
+import { compareDecimals, multiplyDecimals } from './decimal.mjs';
 import { diffSheets } from './diff.mjs';
 import { makeRowFactory, TOKENS } from './rows.mjs';
 import { PAGES } from '../sources.mjs';
@@ -96,23 +96,73 @@ function keptFrom(previous, onPage) {
 }
 
 const FALLBACK_BASIS =
-  'Highest list price for the token class across every unit price row of the sheet: every model, tier, region, context tier and section, models the page no longer lists included.';
+  'Highest price a lookup can reach for the token class: every unit price row of the sheet, in every model, tier, region, context tier and section, models the page no longer lists included, and every fast-tier input price times the prompt cache multiplier for a class that tier does not list.';
 
-// The rate for a model the sheet does not name: per token class, the highest list price of any row,
-// so an unknown model is never priced below a known one. The row that sets it is its source.
+const isTokenPrice = (row) => row.RowType === 'unit_price' && row.PricingUnit === TOKENS;
+const rangeOf = (row) => [row.ContextTierMinInputTokens, row.ContextTierMaxInputTokens].join(' ');
+const sharesDays = (a, b) =>
+  (a.EffectiveEnd === null || b.EffectiveStart < a.EffectiveEnd) &&
+  (b.EffectiveEnd === null || a.EffectiveStart < b.EffectiveEnd);
+
+// Where a fast tier lists no price for a cache class, a lookup composes one: the tier's global input price
+// times the prompt cache multiplier for the class, a multiplier that names the model before one that names none.
+export function composedPrices(rows) {
+  const multipliers = rows.filter((row) => row.RowType === 'multiplier' && row.ModifierKind === 'prompt_cache');
+  const classes = [...new Set(multipliers.flatMap(({ AppliesToTokenClasses }) => AppliesToTokenClasses))];
+  const listed = new Set(
+    rows
+      .filter(isTokenPrice)
+      .map((row) => [row.ModelId, row.ServiceTier, row.RegionId, rangeOf(row), row.TokenClass].join(' ')),
+  );
+  const inputs = rows.filter(
+    (row) =>
+      isTokenPrice(row) &&
+      row.ServiceTier === 'fast' &&
+      row.RegionId === 'global' &&
+      row.TokenClass === 'input_uncached',
+  );
+  return inputs.flatMap((input) =>
+    classes
+      .filter((TokenClass) => !listed.has([input.ModelId, 'fast', 'global', rangeOf(input), TokenClass].join(' ')))
+      .flatMap((TokenClass) => {
+        const applying = multipliers.filter(
+          (row) => row.AppliesToTokenClasses.includes(TokenClass) && sharesDays(row, input),
+        );
+        const multiplier =
+          applying.find(({ AppliesToModels }) => AppliesToModels.includes(input.ModelId)) ??
+          applying.find(({ AppliesToModels }) => AppliesToModels.length === 0);
+        if (!multiplier) return [];
+        return [
+          {
+            TokenClass,
+            ListUnitPrice: multiplyDecimals(input.ListUnitPrice, multiplier.Multiplier),
+            source: input,
+            setBy: `${input.SkuPriceId} times ${multiplier.SkuPriceId}`,
+          },
+        ];
+      }),
+  );
+}
+
+// The rate for a model the sheet does not name: per token class, the highest price a lookup can reach,
+// listed or composed, so an unknown model is never priced below a known one. What sets it is its source.
 export function boundingFallback(factory, rows) {
+  const candidates = [
+    ...rows.filter(isTokenPrice).map((row) => ({ ...row, source: row, setBy: row.SkuPriceId })),
+    ...composedPrices(rows),
+  ];
   const highest = new Map();
-  for (const row of rows) {
-    if (row.RowType !== 'unit_price' || row.PricingUnit !== TOKENS) continue;
-    const best = highest.get(row.TokenClass);
-    if (!best || compareDecimals(row.ListUnitPrice, best.ListUnitPrice) > 0) highest.set(row.TokenClass, row);
+  for (const candidate of candidates) {
+    const best = highest.get(candidate.TokenClass);
+    if (!best || compareDecimals(candidate.ListUnitPrice, best.ListUnitPrice) > 0)
+      highest.set(candidate.TokenClass, candidate);
   }
   if (highest.size === 0) throw new Error('the sheet has no unit price to bound');
   return [...highest.keys()].sort().map((TokenClass) => {
-    const top = highest.get(TokenClass);
+    const { ListUnitPrice, source, setBy } = highest.get(TokenClass);
     return factory.fallback(
-      { url: top.SourceUrl, retrievedAt: top.RetrievalDate, sha256: top.SourceSha256 },
-      { TokenClass, ListUnitPrice: top.ListUnitPrice, FallbackBasis: `${FALLBACK_BASIS} Set by ${top.SkuPriceId}.` },
+      { url: source.SourceUrl, retrievedAt: source.RetrievalDate, sha256: source.SourceSha256 },
+      { TokenClass, ListUnitPrice, FallbackBasis: `${FALLBACK_BASIS} Set by ${setBy}.` },
     );
   });
 }

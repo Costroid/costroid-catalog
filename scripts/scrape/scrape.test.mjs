@@ -8,11 +8,12 @@ import { describe, test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { fallbackProblems, overlapProblems } from '../validate.mjs';
 import { buildCrosscheck } from './lib/crosscheck.mjs';
-import { compareDecimals, maxDecimal, perTokenToPerMillion } from './lib/decimal.mjs';
+import { compareDecimals, maxDecimal, multiplyDecimals, perTokenToPerMillion } from './lib/decimal.mjs';
 import { diffSheets, renderDiff } from './lib/diff.mjs';
 import { moneyOf, parseTables, stripMarkup } from './lib/markdown.mjs';
 import { makeRowFactory } from './lib/rows.mjs';
 import {
+  boundingFallback,
   buildEachSheet,
   buildSheets,
   CATALOG_VERSION,
@@ -51,8 +52,8 @@ const pages = pagesSaved ? loadPages() : {};
 const { sheets } = pagesSaved ? buildSheets(pages) : { sheets: [] };
 const sheet = (provider) => sheets.find(({ Provider }) => Provider === provider);
 const PREVIOUS = releaseBefore(CATALOG_VERSION);
-// Release 0.1.0 predates the rule that the fallback is the highest price of its class. A published release never changes.
-const FIRST_RULED_RELEASE = '0.2.0';
+// From 0.4.1 the fallback is the highest price a lookup can reach, composed prices included. A published release never changes.
+const FIRST_COMPOSED_RELEASE = '0.4.1';
 const BUILD = join(ROOT, 'scripts', 'scrape', 'build.mjs');
 
 function priceOf(provider, modelId, tokenClass, scope = {}) {
@@ -829,19 +830,55 @@ describe('the price rules of a release', () => {
   const tokenRows = (sheet) =>
     sheet.rows.filter((row) => row.RowType === 'unit_price' && row.PricingUnit === '1000000 Tokens');
 
-  // Computed from the rows each time, so a new model, tier or context range can never leave it behind.
+  const cacheMultipliers = (sheet) =>
+    sheet.rows.filter((row) => row.RowType === 'multiplier' && row.ModifierKind === 'prompt_cache');
+
+  // Every price a lookup can reach, as Costroid looks one up: a listed unit price, or, where a fast tier
+  // lists no price for a class, its global input price times the prompt cache multiplier for that class,
+  // the one that names the model before the one that names none.
+  function reachablePrices(sheet) {
+    const listed = tokenRows(sheet).map(({ TokenClass, ListUnitPrice }) => ({ TokenClass, ListUnitPrice }));
+    const composed = [];
+    const fastInputs = tokenRows(sheet).filter(
+      (row) => row.ServiceTier === 'fast' && row.RegionId === 'global' && row.TokenClass === 'input_uncached',
+    );
+    for (const input of fastInputs) {
+      for (const TokenClass of new Set(cacheMultipliers(sheet).flatMap((row) => row.AppliesToTokenClasses))) {
+        const lists = tokenRows(sheet).some(
+          (row) =>
+            row.ModelId === input.ModelId &&
+            row.ServiceTier === 'fast' &&
+            row.RegionId === 'global' &&
+            row.TokenClass === TokenClass &&
+            row.ContextTierMinInputTokens === input.ContextTierMinInputTokens &&
+            row.ContextTierMaxInputTokens === input.ContextTierMaxInputTokens,
+        );
+        if (lists) continue;
+        const forClass = cacheMultipliers(sheet).filter((row) => row.AppliesToTokenClasses.includes(TokenClass));
+        const multiplier =
+          forClass.find((row) => row.AppliesToModels.includes(input.ModelId)) ??
+          forClass.find((row) => row.AppliesToModels.length === 0);
+        if (multiplier)
+          composed.push({ TokenClass, ListUnitPrice: multiplyDecimals(input.ListUnitPrice, multiplier.Multiplier) });
+      }
+    }
+    return [...listed, ...composed];
+  }
+
+  // Computed from the rows each time, so a new model, tier, context range or multiplier can never leave it behind.
   function fallbackShortfalls(sheet) {
+    const reachable = reachablePrices(sheet);
     const fallbacks = sheet.rows.filter(({ RowType }) => RowType === 'fallback');
-    const classes = new Set(tokenRows(sheet).map(({ TokenClass }) => TokenClass));
-    const missing = [...classes]
+    const missing = [...new Set(reachable.map(({ TokenClass }) => TokenClass))]
       .filter((tokenClass) => !fallbacks.some(({ TokenClass }) => TokenClass === tokenClass))
       .map((tokenClass) => `no fallback for ${tokenClass}`);
     const wrong = fallbacks.flatMap(({ SkuPriceId, TokenClass, ListUnitPrice }) => {
-      const prices = tokenRows(sheet).filter((row) => row.TokenClass === TokenClass);
-      const highest = maxDecimal(prices.map((row) => row.ListUnitPrice));
+      const highest = maxDecimal(
+        reachable.filter((price) => price.TokenClass === TokenClass).map((price) => price.ListUnitPrice),
+      );
       return compareDecimals(ListUnitPrice, highest) === 0
         ? []
-        : [`${SkuPriceId} is ${ListUnitPrice}, the highest ${TokenClass} price is ${highest}`];
+        : [`${SkuPriceId} is ${ListUnitPrice}, the highest ${TokenClass} price a lookup reaches is ${highest}`];
     });
     return [...missing, ...wrong];
   }
@@ -870,17 +907,34 @@ describe('the price rules of a release', () => {
     );
   });
 
-  test('every fallback equals the highest unit price of its token class in its sheet', () => {
-    const ruled = releases().filter((release) => compareVersions(release, FIRST_RULED_RELEASE) >= 0);
+  test('every fallback equals the highest price a lookup can reach for its token class', () => {
+    const ruled = releases().filter((release) => compareVersions(release, FIRST_COMPOSED_RELEASE) >= 0);
     const candidates = [...ruled.flatMap(readRelease), ...sheets];
     assert.ok(candidates.length >= ruled.length * 5);
     for (const candidate of candidates) {
       assert.deepEqual(fallbackShortfalls(candidate), [], `${candidate.CatalogVersion} ${candidate.Provider}`);
     }
-    const first = readRelease('0.1.0').find(({ Provider }) => Provider === 'openai');
-    assert.ok(
-      fallbackShortfalls(first).includes('openai:fallback:output is 180.00, the highest output price is 600.00'),
+    const factory = factoryFor(anthropicParser.META);
+    const handRows = parseAnthropic(anthropicPage()).filter(({ RowType }) => RowType !== 'fallback');
+    const handSheet = { rows: [...handRows, ...boundingFallback(factory, handRows)] };
+    assert.deepEqual(fallbackShortfalls(handSheet), []);
+    const write = handRow(handSheet.rows, 'anthropic:fallback:cache_write_1h');
+    assert.equal(write.ListUnitPrice, '32');
+    assert.match(
+      write.FallbackBasis,
+      /Set by anthropic:claude-fable-5-2:global:fast:all:input_uncached times anthropic:multiplier:prompt-cache-write-1h\.$/,
     );
+  });
+
+  test('release 0.4.0 prices two Anthropic cache writes below what a fast mode lookup composes', () => {
+    const released = readRelease('0.4.0');
+    assert.deepEqual(fallbackShortfalls(released.find(({ Provider }) => Provider === 'anthropic')), [
+      'anthropic:fallback:cache_write_1h is 30, the highest cache_write_1h price a lookup reaches is 32',
+      'anthropic:fallback:cache_write_5m is 18.75, the highest cache_write_5m price a lookup reaches is 20',
+    ]);
+    for (const sheet of released.filter(({ Provider }) => Provider !== 'anthropic')) {
+      assert.deepEqual(fallbackShortfalls(sheet), [], sheet.Provider);
+    }
   });
 
   test('no two unit_price rows overlap', () => {
@@ -1393,15 +1447,20 @@ describe('every sheet', needsPages, () => {
     }
   });
 
-  test('every fallback is the highest price of its class and cites the row that sets it', () => {
+  test('every fallback cites the rows that set it, at the price they give', () => {
     for (const { rows } of sheets) {
       for (const fallback of rows.filter(({ RowType }) => RowType === 'fallback')) {
-        const top = rows.find(({ SkuPriceId }) => fallback.FallbackBasis.endsWith(`Set by ${SkuPriceId}.`));
-        assert.equal(top.ListUnitPrice, fallback.ListUnitPrice, fallback.SkuPriceId);
-        assert.equal(top.SourceSha256, fallback.SourceSha256, fallback.SkuPriceId);
+        const [unitId, multiplierId] = /Set by (.+)\.$/.exec(fallback.FallbackBasis)[1].split(' times ');
+        const unit = rows.find(({ SkuPriceId }) => SkuPriceId === unitId);
+        const multiplier = rows.find(({ SkuPriceId }) => SkuPriceId === multiplierId);
+        const given = multiplier ? multiplyDecimals(unit.ListUnitPrice, multiplier.Multiplier) : unit.ListUnitPrice;
+        assert.equal(given, fallback.ListUnitPrice, fallback.SkuPriceId);
+        assert.equal(unit.SourceSha256, fallback.SourceSha256, fallback.SkuPriceId);
       }
     }
     assert.equal(rowById('anthropic:fallback:output').ListUnitPrice, '80');
+    assert.equal(rowById('anthropic:fallback:cache_write_5m').ListUnitPrice, '20');
+    assert.equal(rowById('anthropic:fallback:cache_read').ListUnitPrice, '1.50');
     assert.equal(rowById('openai:fallback:output').ListUnitPrice, '600.00');
     assert.equal(rowById('openai:fallback:cache_read').ListUnitPrice, '12.00');
     assert.equal(rowById('google:fallback:input_uncached').ListUnitPrice, '7.20');

@@ -17,6 +17,17 @@ export function compareDecimals(left, right) {
   return scaledA > scaledB ? 1 : 0;
 }
 
+// The exact product, with no trailing zeros after the point: 16 times 1.25 is "20".
+export function multiplyDecimals(left, right) {
+  const a = parts(left);
+  const b = parts(right);
+  const scale = a.scale + b.scale;
+  const digits = (a.digits * b.digits).toString().padStart(scale + 1, '0');
+  const whole = digits.slice(0, digits.length - scale);
+  const fraction = digits.slice(digits.length - scale).replace(/0+$/, '');
+  return fraction === '' ? whole : `${whole}.${fraction}`;
+}
+
 export function maxDecimal(values) {
   return values.reduce((best, value) => (compareDecimals(value, best) > 0 ? value : best));
 }
