@@ -85,9 +85,17 @@ const handWritten = (text) => ({
 const factoryFor = ({ sheet, serviceProviderName }) =>
   makeRowFactory({ provider: sheet, serviceProviderName, sheetDate: SHEET_DATE });
 
+const CONTEXT_HEADER = [
+  `| Model | ${['input', 'output', 'cached input', '30m write', '12h write'].flatMap((column) => [`Short context ${column}`, `Long context ${column}`]).join(' | ')} |`,
+  `|${' --- |'.repeat(11)}`,
+];
+
+// solPromotion and lawPromotion null leave the sentence out, as a page does once a promotion is gone.
 function openaiPage({
   solPromotion = 'until November 30, 2026',
+  lawPromotion = 'GPT-6 Astra for Law promotional pricing is available at least through December 31, 2026.',
   fedramp = 'FedRAMP endpoints are also charged a 10% uplift.',
+  flagship = [],
   specialized = [],
   beforeTools = [],
   webSearch = [
@@ -102,15 +110,14 @@ function openaiPage({
     '',
     '### Standard pricing data',
     '',
-    `| Model | ${['input', 'output', 'cached input', '30m write', '12h write'].flatMap((column) => [`Short context ${column}`, `Long context ${column}`]).join(' | ')} |`,
-    `|${' --- |'.repeat(11)}`,
+    ...CONTEXT_HEADER,
     '| gpt-5.6-sol | $4.00 | $8.00 | $20.00 | $30.00 | $0.40 | $0.80 | - | - | - | - |',
     '| gpt-6-astra | $10.00 | $20.00 | $50.00 | $75.00 | $1.00 | $2.00 | $12.50 | $25.00 | $25.00 | $50.00 |',
     '',
+    ...flagship,
     'Short context: ≤272K input tokens. Long context: >272K input tokens.',
     '',
-    `GPT-5.6 Sol’s promotional pricing is available ${solPromotion}.`,
-    '',
+    ...(solPromotion === null ? [] : [`GPT-5.6 Sol’s promotional pricing is available ${solPromotion}.`, '']),
     'Specialized models',
     '',
     'Standard',
@@ -124,8 +131,7 @@ function openaiPage({
     '| Embedding | text-embedding-3-small | $0.02 | - | - | - | - |',
     '| Moderation | omni-moderation-latest | Free | - | - | - | - |',
     '',
-    'GPT-6 Astra for Law promotional pricing is available at least through December 31, 2026.',
-    '',
+    ...(lawPromotion === null ? [] : [lawPromotion, '']),
     ...beforeTools,
     'Tools',
     '',
@@ -417,7 +423,112 @@ describe('parsers on hand-written pages', () => {
     assert.equal(handRow(rows, 'openai:gpt-6-astra:global:standard:to-272000:input_uncached').EffectiveEnd, null);
     const older = parseOpenai(openaiPage({ solPromotion: 'at least through November 21, 2026' }));
     assert.equal(handRow(older, 'openai:gpt-5.6-sol:global:standard:to-272000:output').EffectiveEnd, '2026-11-22');
-    assert.throws(() => parseOpenai(openaiPage({ solPromotion: 'for now' })), /GPT-5\.6 Sol’s promotion not found/);
+    assert.throws(() => parseOpenai(openaiPage({ solPromotion: 'for now' })), /unread promotion "GPT-5\.6 Sol’s/);
+  });
+
+  test('reads every model a promotion sentence names', () => {
+    const specialized = [
+      '| Life Sciences — Trusted Access: [Rosalind](https://example.com/) | gpt-6-rosalind (short context) | $10.00 | $50.00 | $1.00 | $12.50 | $25.00 |',
+      '| Legal model configurations | gpt-6.2-astra-law (short context) | $8.00 | $40.00 | $0.40 | $10.00 | $20.00 |',
+      '| Legal model configurations | gpt-6.2-astra-law (long context) | $16.00 | $60.00 | $0.80 | $20.00 | $40.00 |',
+    ];
+    const named = (models) => `${models} promotional pricing is available at least through December 31, 2026.`;
+    const rows = parseOpenai(
+      openaiPage({
+        specialized,
+        lawPromotion: named('GPT-6 Astra for Law, GPT-6.2 Astra for Law, and GPT-6 Rosalind'),
+      }),
+    );
+    for (const id of [
+      'openai:gpt-6-astra-law:global:standard:all:output',
+      'openai:gpt-6.2-astra-law:global:standard:over-272000:input_uncached',
+      'openai:gpt-6-rosalind:global:standard:to-272000:cache_write_12h',
+    ]) {
+      assert.equal(handRow(rows, id).EffectiveEnd, '2027-01-01', id);
+      assert.equal(handRow(rows, id).Note, 'Promotional price, available at least through December 31, 2026.', id);
+    }
+    assert.equal(handRow(rows, 'openai:gpt-6.2-astra-law:global:standard:to-272000:output').ListUnitPrice, '40.00');
+    assert.equal(handRow(rows, 'openai:gpt-6-rosalind:global:standard:to-272000:output').ModelStatus, 'limited');
+    assert.equal(handRow(rows, 'openai:gpt-6.2-astra-law:global:standard:to-272000:output').ModelStatus, 'unstated');
+    assert.throws(
+      () => parseOpenai(openaiPage({ specialized, lawPromotion: named('GPT-6 Astra for Law and GPT-9 Nova') })),
+      /a promotion names gpt-9-nova, which no priced table lists/,
+    );
+    assert.throws(
+      () =>
+        parseOpenai(openaiPage({ specialized, lawPromotion: named('GPT-6 Astra for Law and the Rosalind models') })),
+      /unread model names/,
+    );
+  });
+
+  test('a promotion the page no longer mentions leaves its model priced with no end', () => {
+    const rows = parseOpenai(openaiPage({ solPromotion: null, lawPromotion: null }));
+    const sol = handRow(rows, 'openai:gpt-5.6-sol:global:standard:to-272000:input_uncached');
+    assert.equal(sol.ListUnitPrice, '4.00');
+    assert.equal(sol.EffectiveEnd, null);
+    assert.equal(sol.Note, undefined);
+    assert.equal(handRow(rows, 'openai:gpt-6-astra-law:global:standard:all:output').EffectiveEnd, null);
+    const lawOnly = parseOpenai(openaiPage({ solPromotion: null }));
+    assert.equal(handRow(lawOnly, 'openai:gpt-6-astra-law:global:standard:all:output').EffectiveEnd, '2027-01-01');
+    assert.equal(handRow(lawOnly, 'openai:gpt-5.6-sol:global:standard:over-272000:output').EffectiveEnd, null);
+  });
+
+  test('dates an Ultrafast promotion table and list table by the sentence that states them', () => {
+    const phases =
+      'For GPT-6 Astra, Ultrafast costs 3 times the Standard rate through February 28, 2027, and 6 times the Standard rate starting March 1, 2027 (Pacific time).';
+    const ultrafast = ({ sentence = phases, promotion = '$30.00' } = {}) => [
+      'Ultrafast',
+      '',
+      ...(sentence === null ? [] : [sentence, '']),
+      '### Ultrafast promotion pricing data',
+      '',
+      ...CONTEXT_HEADER,
+      `| gpt-6-astra | ${promotion} | $60.00 | $150.00 | $225.00 | $3.00 | $6.00 | - | - | - | - |`,
+      '',
+      '### Ultrafast list pricing data',
+      '',
+      ...CONTEXT_HEADER,
+      '| gpt-6-astra | $60.00 | $120.00 | $300.00 | $450.00 | $6.00 | $12.00 | - | - | - | - |',
+      '',
+    ];
+    const rows = parseOpenai(openaiPage({ flagship: ultrafast() }));
+    const promotional = handRow(rows, 'openai:gpt-6-astra:global:ultrafast:to-272000:input_uncached');
+    assert.equal(promotional.ListUnitPrice, '30.00');
+    assert.equal(promotional.EffectiveEnd, '2027-03-01');
+    assert.equal(
+      promotional.Note,
+      'Ultrafast promotional price, 3 times the Standard rate through February 28, 2027 (Pacific time).',
+    );
+    const list = handRow(rows, 'openai:gpt-6-astra:global:ultrafast:to-272000:input_uncached:from-2027-03-01');
+    assert.equal(list.ListUnitPrice, '60.00');
+    assert.equal(list.EffectiveStart, '2027-03-01');
+    assert.equal(list.EffectiveEnd, null);
+    const ask = (date) =>
+      rateOn(rows, { model: 'gpt-6-astra', tier: 'ultrafast', tokenClass: 'output', date, inputTokens: 300000 });
+    assert.equal(ask('2027-02-28').ListUnitPrice, '225.00');
+    assert.equal(ask('2027-03-01').ListUnitPrice, '450.00');
+    assert.throws(
+      () => parseOpenai(openaiPage({ flagship: ultrafast({ promotion: '$31.00' }) })),
+      /ultrafast:to-272000:input_uncached is not 3 times its Standard price/,
+    );
+    assert.throws(
+      () =>
+        parseOpenai(openaiPage({ flagship: ultrafast({ sentence: phases.replace('GPT-6 Astra', 'GPT-6.1 Sol') }) })),
+      /the Ultrafast promotion table lists gpt-6-astra, which its sentence does not name/,
+    );
+    assert.throws(
+      () => parseOpenai(openaiPage({ flagship: ultrafast({ sentence: null }) })),
+      /no sentence dates the Ultrafast promotion table/,
+    );
+    assert.throws(
+      () =>
+        parseOpenai(
+          openaiPage({
+            flagship: ultrafast({ sentence: 'For GPT-6 Astra, Ultrafast costs 3 times the Standard rate.' }),
+          }),
+        ),
+      /unread price phases/,
+    );
   });
 
   test('reads both FedRAMP wordings', () => {
@@ -556,6 +667,43 @@ describe('parsers on hand-written pages', () => {
       published({ model: 'gemini-2.5-flash', tier: 'batch', tokenClass: 'cache_read', date: '2026-12-01' }),
       '0.015',
     );
+  });
+
+  test('leaves out a Genie model and still refuses its qualifier on a text model', () => {
+    const page = (heading) =>
+      [
+        '# Gemini Developer API pricing',
+        '',
+        `## ${heading}  {% id="genie-4" %}`,
+        '',
+        '*[`genie-4`](/docs/models/genie-4)*',
+        '',
+        '{% tabs %}',
+        ...tab(
+          'Standard',
+          ['  * $1.50 (text / reference image)'],
+          ['  * $9.00 (text)', '  $17.50 (video, audio included)'],
+        ),
+        '{% /tabs %}',
+        '',
+        '## Gemini 9 Flash  {% id="gemini-9-flash" %}',
+        '',
+        '*[`gemini-9-flash`](/docs/models/gemini-9-flash)*',
+        '',
+        '{% tabs %}',
+        ...tab('Standard', ['  * $0.50'], ['  * $3.00']),
+        '{% /tabs %}',
+        '',
+      ].join('\n');
+    const { rows, omissions } = googleParser.parse(
+      { 'google-pricing': handWritten(page('Genie 4')) },
+      factoryFor(googleParser.META),
+    );
+    assert.ok(!rows.some(({ ModelId }) => ModelId === 'genie-4'));
+    assert.equal(handRow(rows, 'google:gemini-9-flash:global:standard:all:input_uncached').ListUnitPrice, '0.50');
+    assert.equal(omissions[0].item, 'Genie 4');
+    assert.equal(omissions[0].reason, 'On the page, outside the text-token scope of the catalog.');
+    assert.throws(() => parseGoogle(page('Gemini 9 World')), /unread qualifier "\(text \/ reference image\)"/);
   });
 
   test('a reroute the parser cannot read stops the build', () => {

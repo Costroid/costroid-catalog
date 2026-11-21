@@ -1,0 +1,98 @@
+[
+  {
+    "id": "anthropic-pricing",
+    "url": "https://platform.claude.com/docs/en/about-claude/pricing.md",
+    "file": "pages/anthropic-pricing.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "488e03e9cc17c794593348133aa9869d650964d599af58604a9838a0ae47e816",
+    "bytes": 40637
+  },
+  {
+    "id": "anthropic-model-status",
+    "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations.md",
+    "file": "pages/anthropic-model-status.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "4293738873aa27f7e8260440a52dbafd4858565ae2a2c559d00b4177b85c7dff",
+    "bytes": 14100
+  },
+  {
+    "id": "anthropic-thinking",
+    "url": "https://platform.claude.com/docs/en/build-with-claude/thinking.md",
+    "file": "pages/anthropic-thinking.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "f77c60aabc9adbbad03d89dcde1d3e9e6283a890bb2103e448dd0de6726fa107",
+    "bytes": 84681
+  },
+  {
+    "id": "openai-pricing",
+    "url": "https://developers.openai.com/api/docs/pricing.md",
+    "file": "pages/openai-pricing.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "88f7825ffddb006fefea4d3838831bd3deaed6f72df6914ad79aefa021d51355",
+    "bytes": 24263
+  },
+  {
+    "id": "openai-reasoning",
+    "url": "https://developers.openai.com/api/docs/guides/reasoning.md",
+    "file": "pages/openai-reasoning.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "f0c480788b035a289f34aef88a58cb48abead8abd82194ae8f68b110d5971bfa",
+    "bytes": 75689
+  },
+  {
+    "id": "google-pricing",
+    "url": "https://ai.google.dev/gemini-api/docs/pricing.md.txt",
+    "file": "pages/google-pricing.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "40202cdd6fc4eb04984af6ba5426b234540a0b37d819ed0c1d9d34f1d38fd155",
+    "bytes": 117966
+  },
+  {
+    "id": "github-copilot-pricing",
+    "url": "https://docs.github.com/api/article/body?pathname=/en/copilot/reference/copilot-billing/models-and-pricing",
+    "file": "pages/github-copilot-pricing.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "92fd8fea93f82964034759b3fabd709991c8a243a87b481c4a936fbacc648126",
+    "bytes": 25795
+  },
+  {
+    "id": "github-copilot-legacy-multipliers",
+    "url": "https://docs.github.com/api/article/body?pathname=/en/copilot/reference/copilot-billing/request-based-billing-legacy/model-multipliers-for-annual-plans",
+    "file": "pages/github-copilot-legacy-multipliers.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "7191468007f73d187a6d08cbe687cece4b0b21b98ba309e5171bfcd51e7da3c7",
+    "bytes": 2986
+  },
+  {
+    "id": "github-copilot-legacy-requests",
+    "url": "https://docs.github.com/api/article/body?pathname=/en/copilot/reference/copilot-billing/request-based-billing-legacy/copilot-requests",
+    "file": "pages/github-copilot-legacy-requests.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "4c44836b785c06ba94b38faf0732eb0fa7cdf8a53bcf4b75613e84afadb780c2",
+    "bytes": 12246
+  },
+  {
+    "id": "cursor-pricing",
+    "url": "https://cursor.com/docs/models-and-pricing.md",
+    "file": "pages/cursor-pricing.md",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "653a9ff7d68408e1346d160f04dc39571b90e15394affa8f44f07aafb5dc4f52",
+    "bytes": 60050
+  },
+  {
+    "id": "litellm-map",
+    "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+    "file": "crosscheck/litellm-model-prices.json",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "f410a08e6d566829e3a858b00e8b23f5a796fd2360f056a69cab43526f908864",
+    "bytes": 5080361
+  },
+  {
+    "id": "openrouter-listing",
+    "url": "https://openrouter.ai/api/v1/models",
+    "file": "crosscheck/openrouter-models.json",
+    "retrievedAt": "2026-11-21T10:07:52Z",
+    "sha256": "19214ba490361282d5b591a38322667548e2d9ca0faf47591f0e9ffc3cd119bf",
+    "bytes": 925139
+  }
+]

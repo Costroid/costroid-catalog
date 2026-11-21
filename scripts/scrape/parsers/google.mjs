@@ -2,8 +2,10 @@ import { dayAfter, isoDate, sections, stripMarkup } from '../lib/markdown.mjs';
 
 export const META = { sheet: 'google', serviceProviderName: 'Google' };
 
+// A model that generates audio, images, video or vectors, or a section that prices no model. Genie streams video
+// worlds and bills mostly at its video rate, so its text rates alone would price it too low.
 const NOT_TEXT_MODEL =
-  /Live|Translate|Transcribe|TTS|Image|Banana|Lyria|Embedding|Robotics|Omni|Gemma|Pricing for|Notes/;
+  /Live|Translate|Transcribe|TTS|Image|Banana|Lyria|Embedding|Robotics|Omni|Genie|Gemma|Pricing for|Notes/;
 const TIERS = { Standard: 'standard', Batch: 'batch', Flex: 'flex', Priority: 'priority', Contributor: 'contributor' };
 const STORAGE_UNIT = '1000000 Token-Hours';
 const DATE = '([A-Z][a-z]+ \\d{1,2}, \\d{4})';
